@@ -679,7 +679,22 @@ export async function addFeatured(f: {
 // isn't re-crawled (and re-billed against the Gemini budget) every day for no
 // reason. `now` is injectable so this is deterministic in tests instead of
 // depending on which real-world day the suite happens to run.
-export async function getEnabledSources(cityId: number, now: Date = new Date()): Promise<SourceRow[]> {
+// `shard` deterministically partitions a city's sources across N cron windows
+// (`{ index, total }`, e.g. shard 0 of 2). A city with more sources than one
+// 300s invocation can finish concurrently (austin's ~67 vs houston's ~30) would
+// otherwise leave the sources still in flight when maxDuration fires orphaned at
+// 'running'. Partitioning by `id % total` is stable — every source belongs to
+// exactly one shard, so the windows together give full coverage with no
+// double-crawl, and new sources balance across shards automatically.
+// `ignoreCadence` bypasses the weekly-day gate so an operator can force every
+// enabled source to run on demand (e.g. re-crawling weekly sources that were
+// orphaned by a mid-week overflow, off their normal Monday schedule).
+export async function getEnabledSources(
+  cityId: number,
+  now: Date = new Date(),
+  shard?: { index: number; total: number },
+  ignoreCadence = false,
+): Promise<SourceRow[]> {
   const db = await getDb()
   const rows = await db.query<SourceRow>(
     `SELECT id, city_id, name, kind, url, parser, cadence, enabled,
@@ -689,8 +704,11 @@ export async function getEnabledSources(cityId: number, now: Date = new Date()):
      ORDER BY last_success ASC NULLS FIRST, id ASC`,
     [cityId]
   )
-  const isWeeklyRunDay = now.getUTCDay() === 1 // Monday
-  return rows.filter(r => r.cadence !== 'weekly' || isWeeklyRunDay)
+  const isWeeklyRunDay = ignoreCadence || now.getUTCDay() === 1 // Monday
+  return rows.filter(r =>
+    (r.cadence !== 'weekly' || isWeeklyRunDay) &&
+    (!shard || shard.total <= 1 || ((r.id % shard.total) === shard.index))
+  )
 }
 
 export async function getSourceContentHash(id: number): Promise<string | null> {
@@ -792,6 +810,27 @@ export async function finishSourceRun(
     [id, fields.status, fields.events_found ?? 0, fields.events_upserted ?? 0,
      fields.events_rejected ?? 0, fields.gemini_requests ?? 0, fields.error ?? null]
   )
+}
+
+// Finalize runs orphaned at 'running'. When a function is killed by its
+// maxDuration (300s) mid-crawl, the sources still in flight never reach
+// finishSourceRun, so their rows are stuck 'running' forever — invisible to the
+// health ledger (which ignores 'running') yet never actually completed. Any run
+// still 'running' well past the max invocation wall-clock can only be orphaned,
+// so we mark it 'error'. Called at the top of every ingest so the ledger is
+// self-healing. Returns how many rows were reaped.
+export async function reapStaleRuns(olderThanMs = 15 * 60 * 1000): Promise<number> {
+  const db = await getDb()
+  const rows = await db.query<{ id: number }>(
+    `UPDATE source_runs
+        SET status = 'error', finished_at = NOW(),
+            error = 'orphaned: function timed out before finish (reaped)'
+      WHERE status = 'running'
+        AND started_at < NOW() - ($1::bigint * INTERVAL '1 millisecond')
+      RETURNING id`,
+    [olderThanMs]
+  )
+  return rows.length
 }
 
 // The most recent `perSource` runs for each source, newest first — the raw
