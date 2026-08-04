@@ -19,8 +19,9 @@ async function run(req: NextRequest) {
   const to = req.nextUrl.searchParams.get('to')
   if (!to) return NextResponse.json({ error: 'Missing ?to= address' }, { status: 400 })
 
+  // Defaults to weekly; pass ?frequency=daily for the 1-day window.
   const frequency: DigestFrequency =
-    req.nextUrl.searchParams.get('frequency') === 'weekly' ? 'weekly' : 'daily'
+    req.nextUrl.searchParams.get('frequency') === 'daily' ? 'daily' : 'weekly'
 
   // Default to the first enabled city unless an explicit ?city=<id> is given.
   const cityParam = req.nextUrl.searchParams.get('city')
