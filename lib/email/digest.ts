@@ -165,3 +165,39 @@ export async function sendDigests(frequency: DigestFrequency, cityId: number) {
 
   return { sent, frequency, cityId }
 }
+
+// Sends ONE digest to a single address for testing in prod, without touching the
+// subscriber list. Renders the same template as sendDigests so what you receive
+// matches what real subscribers get. Returns a diagnostic object rather than
+// throwing so the route can surface why a send didn't happen.
+export async function sendDigestPreview(to: string, frequency: DigestFrequency, cityId: number) {
+  const city = await getCityById(cityId)
+  if (!city) return { ok: false, reason: `no city with id ${cityId}` }
+  if (!resend) return { ok: false, reason: 'RESEND_API_KEY is unset' }
+
+  const baseUrl = getBaseUrl()
+  const now = new Date()
+  const windowDays = frequency === 'weekly' ? 7 : 1
+  const end = new Date(now.getTime() + windowDays * 86400000)
+
+  const rawEvents = await getEventsBetween(cityId, now.toISOString(), end.toISOString())
+  const events: EventWithCats[] = rawEvents.map(e => e as unknown as EventWithCats)
+
+  const dateLabel = frequency === 'weekly'
+    ? `week of ${now.toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}`
+    : now.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })
+  const subject = `[Preview] ${city.name} events ${frequency === 'weekly' ? 'this week' : 'today'} — ${dateLabel}`
+
+  // No real subscriber token exists for an ad-hoc preview; point unsubscribe at
+  // the account page so the link is never dead.
+  const unsubscribeUrl = `${baseUrl}/account`
+
+  const { data, error } = await resend.emails.send({
+    from: EMAIL_FROM,
+    to,
+    subject,
+    html: buildDigestHtml(events, unsubscribeUrl, dateLabel, city.name, baseUrl),
+  })
+  if (error) return { ok: false, reason: error.message ?? String(error) }
+  return { ok: true, to, from: EMAIL_FROM, cityId, frequency, events: events.length, id: data?.id }
+}
