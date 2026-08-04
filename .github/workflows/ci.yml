@@ -85,7 +85,10 @@ jobs:
       - name: Set up Supabase CLI
         uses: supabase/setup-cli@v1
         with:
-          version: latest
+          # Pin an explicit version: `latest` makes the action hit the GitHub
+          # API to resolve the newest release, which gets rate-limited on
+          # shared runners and fails the job. A pinned version skips that call.
+          version: 2.111.0
 
       - name: Push Supabase-era migrations (034+) to the linked project
         env:
