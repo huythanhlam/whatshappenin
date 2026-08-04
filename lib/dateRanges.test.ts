@@ -25,9 +25,20 @@ describe('resolveDateRange', () => {
   })
 
   it('honors explicit from/to and never returns to before from', () => {
-    const r = resolveDateRange({ from: '2026-07-01', to: '2026-07-31' })
+    // Dates are relative to "now" so this never rots: a fixed calendar range
+    // eventually slips into the past, where `from` clamps up to now and the
+    // strict ordering below no longer holds.
+    const ymd = (ms: number) => new Date(ms).toISOString().slice(0, 10)
+    const DAY = 86_400_000
+    const now = Date.now()
+
+    const r = resolveDateRange({ from: ymd(now + 2 * DAY), to: ymd(now + 30 * DAY) })
     expect(r.active).toBe(true)
     expect(new Date(r.fromIso).getTime()).toBeLessThan(new Date(r.toIso!).getTime())
+
+    // A fully-past explicit window must not invert: `to` is floored at `from`.
+    const past = resolveDateRange({ from: '2020-01-01', to: '2020-01-31' })
+    expect(new Date(past.toIso!).getTime()).toBeGreaterThanOrEqual(new Date(past.fromIso).getTime())
   })
 
   it('produces ISO 8601 timestamps', () => {

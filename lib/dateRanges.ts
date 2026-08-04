@@ -71,7 +71,11 @@ export function resolveDateRange(params: {
     const f = params.from ? parseYmd(params.from) : null
     const t = params.to ? parseYmd(params.to) : null
     const fromIso = f ? maxIso(nowIso, zonedToUtc(f.y, f.m, f.d, 0, 0, 0, TZ).toISOString()) : nowIso
-    const toIso = t ? zonedToUtc(t.y, t.m, t.d, 23, 59, 59, TZ).toISOString() : null
+    // `to` is likewise floored at `fromIso`: when the whole requested window is
+    // in the past, clamping `from` up to now would otherwise invert the range
+    // (to < from). Flooring keeps the invariant "to is never before from" — a
+    // fully-past window collapses to an empty forward slice, never past events.
+    const toIso = t ? maxIso(fromIso, zonedToUtc(t.y, t.m, t.d, 23, 59, 59, TZ).toISOString()) : null
     const label = `${params.from ?? ''}${params.to ? ` – ${params.to}` : '+'}`
     return { fromIso, toIso, label, active: true }
   }

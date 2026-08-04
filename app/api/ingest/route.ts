@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { PARSERS } from '@/lib/sources/registry'
 import type { SourceRow, SourceContext } from '@/lib/sources/types'
 import { persistEvents } from '@/lib/persist'
-import { isLocal, getEnabledCities, getEnabledSources, startSourceRun, finishSourceRun, touchSourceSuccess, type City } from '@/lib/db'
+import { isLocal, getEnabledCities, getEnabledSources, startSourceRun, finishSourceRun, touchSourceSuccess, reapStaleRuns, type City } from '@/lib/db'
 import { withGeminiMeter } from '@/lib/gemini'
 import { requireCronAuth } from '@/lib/auth'
 
@@ -96,7 +96,20 @@ function parseNameSet(v: string | null): Set<string> | null {
   return names.length ? new Set(names) : null
 }
 
-async function runIngest(cityFilter?: string, sourceFilter?: string | null, excludeFilter?: string | null) {
+async function runIngest(
+  cityFilter?: string,
+  sourceFilter?: string | null,
+  excludeFilter?: string | null,
+  shard?: { index: number; total: number },
+  ignoreCadence = false,
+) {
+  // Self-heal the health ledger before starting: any run left 'running' past the
+  // max invocation wall-clock was orphaned by a maxDuration kill and must be
+  // finalized, otherwise a source that never actually completed looks pending
+  // forever (and stays invisible to /api/admin/health, which ignores 'running').
+  const reaped = await reapStaleRuns()
+  if (reaped > 0) console.log(`[ingest] reaped ${reaped} orphaned 'running' run(s)`)
+
   // Ingestion is driven entirely by the `sources` table (Phase 2B), looped over
   // every enabled city (Phase 3): enabled rows for each city, each dispatched to
   // its parser mechanism. Adding coverage is an INSERT, not a code change.
@@ -111,7 +124,7 @@ async function runIngest(cityFilter?: string, sourceFilter?: string | null, excl
   const skip = parseNameSet(excludeFilter ?? null)
 
   const perCity = await Promise.all(cities.map(async city => {
-    let sources = await getEnabledSources(city.id)
+    let sources = await getEnabledSources(city.id, new Date(), shard, ignoreCadence)
     if (only) sources = sources.filter(s => only.has(s.name))
     if (skip) sources = sources.filter(s => !skip.has(s.name))
     const results = await Promise.all(
@@ -136,9 +149,23 @@ async function runIngest(cityFilter?: string, sourceFilter?: string | null, excl
   return NextResponse.json({ ...totals, byCity: perCity, mode: isLocal() ? 'local' : 'supabase' })
 }
 
-function paramsOf(req: NextRequest): [string | undefined, string | null, string | null] {
+// `?shard=<index>/<total>` splits a city's sources across cron windows so a
+// large city can't overflow one 300s invocation and orphan its tail (see
+// getEnabledSources). Malformed values are ignored (treated as no sharding).
+function parseShard(v: string | null): { index: number; total: number } | undefined {
+  if (!v) return undefined
+  const m = /^(\d+)\/(\d+)$/.exec(v.trim())
+  if (!m) return undefined
+  const index = Number(m[1]), total = Number(m[2])
+  if (!Number.isInteger(total) || total < 1 || index < 0 || index >= total) return undefined
+  return { index, total }
+}
+
+// `?cadence=all` forces weekly sources to run off their Monday schedule — an
+// operator escape hatch for re-crawling on demand (see getEnabledSources).
+function paramsOf(req: NextRequest): [string | undefined, string | null, string | null, { index: number; total: number } | undefined, boolean] {
   const p = req.nextUrl.searchParams
-  return [p.get('city') ?? undefined, p.get('source'), p.get('exclude')]
+  return [p.get('city') ?? undefined, p.get('source'), p.get('exclude'), parseShard(p.get('shard')), p.get('cadence') === 'all']
 }
 
 export async function POST(req: NextRequest) {
