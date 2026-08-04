@@ -1,6 +1,5 @@
 import Link from 'next/link'
-
-const INSTAGRAM_URL = 'https://www.instagram.com/whatshappenin.atx/'
+import { INSTAGRAM_URL } from '@/lib/contact'
 
 // Inline glyph: lucide-react (v1.22.0 in this project) ships no Instagram icon,
 // so we draw the mark ourselves rather than import a non-existent export.
@@ -63,9 +62,21 @@ export function SiteFooter() {
         {/* Legal row */}
         <div className="mt-10 flex flex-col items-center gap-3 border-t border-border pt-6 text-sm text-muted-foreground sm:flex-row sm:justify-between">
           <p>© {year} Whats Happenin. All rights reserved.</p>
-          <nav className="flex items-center gap-5">
+          <nav className="flex flex-wrap items-center justify-center gap-x-5 gap-y-2 sm:justify-end">
+            <Link href="/about" className="hover:text-primary transition-colors">
+              About
+            </Link>
             <Link href="/privacy" className="hover:text-primary transition-colors">
-              Privacy Policy
+              Privacy
+            </Link>
+            <Link href="/terms" className="hover:text-primary transition-colors">
+              Terms
+            </Link>
+            <Link href="/cookies" className="hover:text-primary transition-colors">
+              Cookies
+            </Link>
+            <Link href="/contact" className="hover:text-primary transition-colors">
+              Contact
             </Link>
             <a
               href={INSTAGRAM_URL}

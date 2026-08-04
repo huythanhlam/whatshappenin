@@ -1,6 +1,7 @@
 import type { Metadata } from 'next'
 import Link from 'next/link'
 import { ArrowLeft } from 'lucide-react'
+import { INSTAGRAM_HANDLE, INSTAGRAM_URL, SUPPORT_EMAIL } from '@/lib/contact'
 
 export const metadata: Metadata = {
   title: 'Privacy Policy',
@@ -11,7 +12,6 @@ export const metadata: Metadata = {
 // Static, city-agnostic legal page. Lives at the app root (not under [city]) so
 // there's a single canonical /privacy URL linked from the global footer.
 const UPDATED = 'July 22, 2026'
-const INSTAGRAM_URL = 'https://www.instagram.com/whatshappenin.atx/'
 
 export default function PrivacyPage() {
   return (
@@ -41,19 +41,27 @@ export default function PrivacyPage() {
             <ul className="list-disc space-y-2 pl-5 text-foreground/90">
               <li>
                 <strong className="font-semibold text-foreground">Account details.</strong> If you
-                create an account, we store your email address and any profile preferences you set
-                (such as favorite categories).
+                create an account, we store your email address and password (the password is hashed by
+                our authentication provider — we never see it), plus any profile details you set, such
+                as a display name and your home city.
+              </li>
+              <li>
+                <strong className="font-semibold text-foreground">Preferences.</strong> Choices you
+                make during onboarding or in your profile — favorite categories, neighborhoods, days of
+                the week, or a free-events-only preference — so we can tailor what you see.
               </li>
               <li>
                 <strong className="font-semibold text-foreground">Email subscriptions.</strong> When
-                you sign up for event updates, we store your email address so we can send the digests
-                you requested.
+                you sign up for event updates, we store your email address and digest preferences so we
+                can send the digests you requested. You can subscribe to digests without creating an
+                account.
               </li>
               <li>
                 <strong className="font-semibold text-foreground">Activity.</strong> To power
-                recommendations and improve the site, we record actions like saving, hiding, or
-                marking interest in events, and usage analytics such as pages viewed, sign-ups, and
-                event submissions.
+                recommendations and improve the site, we record actions like saving, hiding, marking
+                interest in, sharing, or adding events to your calendar, checking in to events, and the
+                search terms you enter. We derive a taste profile from this activity to personalize your
+                recommendations. We also collect usage analytics such as pages viewed and sign-ups.
               </li>
               <li>
                 <strong className="font-semibold text-foreground">Event submissions.</strong> If you
@@ -73,14 +81,27 @@ export default function PrivacyPage() {
           </section>
 
           <section className="space-y-3">
+            <h2 className="font-display text-xl font-semibold text-foreground">Accounts and sign-in</h2>
+            <p>
+              Accounts use email and a password by default. You can optionally enable a passwordless
+              &ldquo;magic link&rdquo; sign-in, which emails you a one-time login link. Your account
+              data is protected so that only you can access it.
+            </p>
+          </section>
+
+          <section className="space-y-3">
             <h2 className="font-display text-xl font-semibold text-foreground">Analytics and cookies</h2>
             <p>
-              We use Google Analytics to understand how visitors find and use the site — for example,
-              which pages are popular and how many people sign up. Google Analytics sets cookies and
-              collects information such as your approximate location, device, and pages visited, and
-              also measures page performance (load speed and responsiveness). This helps us fix slow
-              pages and improve the experience. We do not use this data for advertising. To learn more,
-              see{' '}
+              With your consent, we use Google Analytics to understand how visitors find and use the
+              site — for example, which pages are popular and how many people sign up. Google Analytics
+              sets cookies and collects information such as your approximate location, device, and pages
+              visited, and also measures page performance (load speed and responsiveness). Analytics
+              stay off until you accept them in our cookie banner. We do not use this data for
+              advertising. See our{' '}
+              <Link href="/cookies" className="font-medium text-primary hover:underline">
+                Cookie Policy
+              </Link>{' '}
+              for details, or{' '}
               <a
                 href="https://policies.google.com/privacy"
                 target="_blank"
@@ -94,11 +115,45 @@ export default function PrivacyPage() {
           </section>
 
           <section className="space-y-3">
-            <h2 className="font-display text-xl font-semibold text-foreground">Sharing</h2>
+            <h2 className="font-display text-xl font-semibold text-foreground">Service providers</h2>
             <p>
-              We do not sell your personal information. We share data only with service providers that
-              help us run the site (for example, hosting, database, and email delivery), and only as
-              needed to provide those services. We may disclose information if required by law.
+              We don&rsquo;t sell your personal information. We share data only with the providers that
+              help us run the site, and only as needed to provide their service. These currently
+              include:
+            </p>
+            <ul className="list-disc space-y-2 pl-5 text-foreground/90">
+              <li>
+                <strong className="font-semibold text-foreground">Supabase</strong> — authentication and
+                our database, where your account and activity data are stored.
+              </li>
+              <li>
+                <strong className="font-semibold text-foreground">Resend</strong> — delivers our emails
+                (confirmations, digests, and sign-in links).
+              </li>
+              <li>
+                <strong className="font-semibold text-foreground">Google Analytics</strong> — usage
+                analytics, as described above.
+              </li>
+              <li>
+                <strong className="font-semibold text-foreground">Vercel</strong> — hosts the site.
+              </li>
+            </ul>
+            <p>
+              We also use Google Maps and Google&rsquo;s Gemini to geocode venues, render maps, and
+              process public event content — these handle event data, not your personal profile. We may
+              update the providers we rely on from time to time, and may disclose information if
+              required by law.
+            </p>
+          </section>
+
+          <section className="space-y-3">
+            <h2 className="font-display text-xl font-semibold text-foreground">Data retention</h2>
+            <p>
+              We keep your personal data for as long as your account or subscription is active. We
+              don&rsquo;t run on a fixed deletion schedule — instead you can remove your data yourself at
+              any time (see &ldquo;Your choices&rdquo; below). Our application uses your IP address only
+              transiently to rate-limit abusive requests and doesn&rsquo;t retain it; our hosting and
+              infrastructure providers may log it briefly for security and operations.
             </p>
           </section>
 
@@ -113,10 +168,26 @@ export default function PrivacyPage() {
 
           <section className="space-y-3">
             <h2 className="font-display text-xl font-semibold text-foreground">Your choices</h2>
+            <ul className="list-disc space-y-2 pl-5 text-foreground/90">
+              <li>
+                <strong className="font-semibold text-foreground">Delete your account.</strong> From
+                your account settings you can permanently delete your account, which removes your
+                profile, saved events, activity, and recommendation data.
+              </li>
+              <li>
+                <strong className="font-semibold text-foreground">Clear your history.</strong> You can
+                clear your activity history (which resets your recommendations) while keeping your
+                account.
+              </li>
+              <li>
+                <strong className="font-semibold text-foreground">Unsubscribe from email.</strong> Every
+                digest includes a one-click unsubscribe link. An email subscription is separate consent,
+                so it stays active even if you delete your account — unsubscribe to end it.
+              </li>
+            </ul>
             <p>
-              You can unsubscribe from any email using the link in that message. You may request access
-              to, correction of, or deletion of your account data by contacting us. Deleting your
-              account removes your associated profile and preference data.
+              You can also request access to or correction of your data by contacting us at the address
+              below.
             </p>
           </section>
 
@@ -132,14 +203,21 @@ export default function PrivacyPage() {
           <section className="space-y-3">
             <h2 className="font-display text-xl font-semibold text-foreground">Contact</h2>
             <p>
-              Questions about this policy or your data? Reach out via our Instagram,{' '}
+              Questions about this policy or your data? Email us at{' '}
+              <a
+                href={`mailto:${SUPPORT_EMAIL}`}
+                className="font-medium text-primary hover:underline"
+              >
+                {SUPPORT_EMAIL}
+              </a>{' '}
+              or reach out via Instagram,{' '}
               <a
                 href={INSTAGRAM_URL}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="font-medium text-primary hover:underline"
               >
-                @whatshappenin.atx
+                {INSTAGRAM_HANDLE}
               </a>
               .
             </p>

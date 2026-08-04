@@ -5,6 +5,7 @@ import { GoogleAnalytics } from "@next/third-parties/google";
 import { getBaseUrl } from "@/lib/site";
 import { organizationJsonLd, websiteJsonLd, jsonLdHtml } from "@/lib/jsonLd";
 import { SiteFooter } from "@/components/SiteFooter";
+import { CookieConsent } from "@/components/CookieConsent";
 import { WebVitals } from "@/components/WebVitals";
 import "./globals.css";
 
@@ -80,9 +81,9 @@ export default function RootLayout({
         {gaId && (
           // Consent Mode v2 defaults, set before gtag.js configures (this runs
           // beforeInteractive; GoogleAnalytics's config runs afterInteractive).
-          // US-only posture today: analytics on, ads off. Structured so a
-          // consent banner can later flip analytics_storage to 'denied' by
-          // default and grant on opt-in — no re-plumbing required.
+          // Everything is denied by default; the <CookieConsent /> banner flips
+          // analytics_storage to 'granted' only after the visitor opts in, and
+          // re-grants on later visits from the stored choice. Ads stay off.
           <Script id="ga-consent-default" strategy="beforeInteractive">
             {`window.dataLayer = window.dataLayer || [];
 function gtag(){dataLayer.push(arguments);}
@@ -90,7 +91,7 @@ gtag('consent', 'default', {
   ad_storage: 'denied',
   ad_user_data: 'denied',
   ad_personalization: 'denied',
-  analytics_storage: 'granted',
+  analytics_storage: 'denied',
 });`}
           </Script>
         )}
@@ -105,6 +106,7 @@ gtag('consent', 'default', {
         />
         {children}
         <SiteFooter />
+        {gaId && <CookieConsent />}
         {gaId && <WebVitals />}
         {gaId && <GoogleAnalytics gaId={gaId} />}
       </body>

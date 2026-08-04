@@ -1,4 +1,4 @@
-# What It Do ATX
+# Whats Happenin
 
 A multi-city events aggregator built on Next.js 16 (App Router, React 19),
 currently live for **Austin** and **Houston** under `/[city]/` routing (`/`
