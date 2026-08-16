@@ -29,6 +29,7 @@ function result(over: Record<string, unknown> = {}): Record<string, unknown> {
     isPaid: false,
     isOnlineEvent: false,
     prices: [],
+    participantsCount: 12,
     ...over,
   }
 }
@@ -121,6 +122,8 @@ describe('eventsFromResults', () => {
     })
     // Occurrence-scoped id: the series UUID alone would collapse a weekly class.
     expect(e.source_id).toBe('aee6a84a-bae8-4c15-824b-9f46d3a658cb:2026-08-16T19:00:00.000Z')
+    // RSVP count feeds prominence for events with no ticketing footprint.
+    expect(e.signals).toEqual({ attendeeCount: 12 })
   })
 
   it('converts cent prices to dollars and spans the tiers', () => {
@@ -174,5 +177,14 @@ describe('eventsFromResults', () => {
   it('skips malformed rows and non-array input', () => {
     expect(eventsFromResults(null, 'src')).toEqual([])
     expect(eventsFromResults([{ id: 'x' }, result({ name: '  ' })], 'src')).toEqual([])
+  })
+})
+
+describe('attendee signal', () => {
+  it('omits the signal when the API supplies no count', () => {
+    // Absent is "unknown attendance", which computeProminence must not read as
+    // "nobody is going".
+    const [e] = eventsFromResults([result({ participantsCount: undefined })], 'crawl:sweatpals-com')
+    expect(e.signals).toBeNull()
   })
 })
