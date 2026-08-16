@@ -18,6 +18,7 @@ import { fetchLumaEvents } from './luma'
 import { fetchMeanwhileEvents } from './meanwhile'
 import { fetchAustinMonthlyEvents } from './austinmonthly'
 import { fetchShowlistEvents } from './showlist'
+import { fetchSweatpalsEvents } from './sweatpals'
 import { extractEvents } from '@/lib/extractor'
 
 const has = (v: string | undefined): boolean => !!v && v.length > 0
@@ -106,6 +107,16 @@ export const PARSERS: Record<string, SourceParser> = {
   // 780+ shows, ~3 months out — is statically rendered into the homepage, so
   // one request covers the full window with no Gemini. `url` is the site root.
   showlist: simple(() => true, (url, name) => fetchShowlistEvents(url!, name)),
+
+  // sweatpals.com/discover: the discover page is client-rendered, but the API
+  // behind it (ilove.sweatpals.com) is public and unauthenticated, so this is
+  // a structured JSON source, no Gemini. Driven entirely off the configured
+  // city — the parser resolves the city's Sweatpals UUID by name+state and
+  // sweeps the rolling window a day at a time (the search has a hard limit of
+  // 500 and no offset param, so date windows ARE the pagination). `url` is
+  // retained only as the human discover page for the UI.
+  sweatpals: simple(() => true, (url, name, ctx) =>
+    fetchSweatpalsEvents(url!, name, { cityName: ctx.city.name, state: ctx.city.state, since: ctx.since })),
 
   // austinmonthly.com/calendar/: WP custom calendar. Two structured passes,
   // no Gemini — paginate its admin-ajax load-more for all detail-page URLs,
