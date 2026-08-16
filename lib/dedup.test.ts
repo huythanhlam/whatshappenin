@@ -69,7 +69,7 @@ describe('chooseMatch', () => {
 
 describe('mergeFields', () => {
   const base: ExistingEvent = {
-    source: 'crawl', source_id: 'x', title: 'old', venue_norm: 'mohawk',
+    source: 'crawl', source_id: 'x', title: 'old', title_norm: 'old', venue_norm: 'mohawk',
     description: 'short', image_url: null, venue_name: null, venue_address: null,
     end_time: null, ticket_url: 'http://crawl', is_free: false,
     price_min: null, price_max: null,

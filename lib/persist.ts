@@ -8,9 +8,10 @@ import {
   getCityById, type City,
 } from '@/lib/db'
 import { normalizeTitle, normalizeVenue } from '@/lib/normalize'
-import { chooseMatch, mergeFields } from '@/lib/dedup'
+import { chooseMatch, mergeFields, type ExistingEvent, type FieldPatch } from '@/lib/dedup'
 import { ensureVenueGeocoded } from '@/lib/geocode'
 import { httpOrNull } from '@/lib/html'
+import { newProminenceBatch, scoreAndStoreProminence } from '@/lib/recs/prominence-store'
 import type { RawEvent } from '@/lib/sources/types'
 import type { CategorySlug } from '@/lib/categories'
 
@@ -76,6 +77,9 @@ export async function persistEvents(
   // lookaside below.
   const checkedVenues = new Set<string>()
   const venueImageCache = new Map<string, string | null>()
+  // Same batch-scoped-cache idea for the world-popularity scoring below: venue
+  // capacities are read once per venue, not once per event.
+  const prominenceBatch = newProminenceBatch()
 
   let inserted = 0
   let skipped = 0
@@ -88,6 +92,14 @@ export async function persistEvents(
       const eventId = await persistOne(events[i], cityId, status, city, checkedVenues, venueImageCache, slugs[i])
       const categoryIds = slugs[i].map(s => categoryIdBySlug[s]).filter(Boolean)
       await setEventCategories(eventId, categoryIds)
+      // Scored after persistOne has recorded provenance, so the corroboration
+      // count includes this source. Never throws: a popularity lookup failing
+      // must not cost us the event.
+      await scoreAndStoreProminence(eventId, events[i], {
+        cityId,
+        venueNorm: normalizeVenue(events[i].venue_name),
+        batch: prominenceBatch,
+      })
       inserted++
     } catch {
       skipped++
@@ -95,6 +107,34 @@ export async function persistEvents(
   }
 
   return { inserted, skipped, rejected, total }
+}
+
+// Self-heal the normalized match keys on an already-canonical event.
+//
+// `title_norm`/`venue_norm` are how findDedupCandidates BLOCKS — a row holding
+// null for them can never be returned as a candidate, so it duplicates against
+// every other source forever and no amount of re-ingesting fixes it. Rows
+// written before those columns existed are in exactly that state (observed in
+// production: 73 Ticketmaster + 9 Eventbrite events, which is why a Ticketmaster
+// arena show sat in the trending rail beside the same show from a crawl source).
+//
+// mergeFields only sets title_norm when the *title* is being upgraded, so it
+// never repairs a pre-existing null. This does, on whichever ingest next touches
+// the row. Only fills nulls; it never overwrites a good value.
+function repairNorms(
+  patch: FieldPatch | null,
+  existing: ExistingEvent,
+  titleNorm: string,
+  venueNorm: string | null
+): FieldPatch | null {
+  const needsTitle = existing.title_norm === null && patch?.title_norm === undefined
+  const needsVenue = existing.venue_norm === null && venueNorm !== null && patch?.venue_norm === undefined
+  if (!needsTitle && !needsVenue) return patch
+
+  const repaired: FieldPatch = { ...(patch ?? {}) }
+  if (needsTitle) repaired.title_norm = titleNorm
+  if (needsVenue) repaired.venue_norm = venueNorm
+  return repaired
 }
 
 // Resolve one raw event to a canonical event id, creating, matching, or merging
@@ -141,7 +181,7 @@ async function persistOne(
     // Same submission/source re-ingested — always safe to merge (same author).
     const existing = await getEventRow(eventId)
     if (existing) {
-      const patch = mergeFields(existing, raw)
+      const patch = repairNorms(mergeFields(existing, raw), existing, titleNorm, venueNorm)
       if (patch) await updateEventFields(eventId, patch)
     }
   } else {
@@ -160,7 +200,7 @@ async function persistOne(
       if (status !== 'pending') {
         const existing = await getEventRow(eventId)
         if (existing) {
-          const patch = mergeFields(existing, raw)
+          const patch = repairNorms(mergeFields(existing, raw), existing, titleNorm, venueNorm)
           if (patch) await updateEventFields(eventId, patch)
         }
       }

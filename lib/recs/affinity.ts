@@ -11,6 +11,7 @@ import {
   ENGAGEMENT_PRIOR_STRENGTH,
   DEFAULT_CITY_ENGAGEMENT_RATE,
 } from './config'
+import { NEUTRAL_PROMINENCE } from './prominence'
 
 // Map a raw signal magnitude to an EMA target in [-1, 1]. A favorite (4.0)
 // saturates to +1; a view (1.0) is a soft +0.25; a hide (-4.0) is -1.
@@ -30,10 +31,33 @@ export function applySignal(prev: number, magnitude: number, alpha: number = EMA
   return emaUpdate(prev, signalTarget(magnitude), alpha)
 }
 
+// The prior mean a given event is smoothed toward — the fix for the cold start
+// that the flat city rate caused. prominence is a 0–1 index, not a rate, so it's
+// mapped onto one: NEUTRAL_PROMINENCE maps to exactly DEFAULT_CITY_ENGAGEMENT_RATE
+// (an event with no evidence behaves exactly as it did before this existed), and
+// the result is clamped so neither a superstar nor a dud can set a prior that
+// real observations can't overcome.
+//
+// MUST stay in sync with public.prior_rate() in migration 046 — the write-through
+// runs in SQL, this is the same policy for anything computing a score in TS
+// (the backfill script, tests).
+export const MIN_PRIOR_RATE = 0.02
+export const MAX_PRIOR_RATE = 0.45
+
+export function priorRate(
+  prominence: number | null | undefined,
+  cityRate: number = DEFAULT_CITY_ENGAGEMENT_RATE,
+): number {
+  const p = prominence ?? NEUTRAL_PROMINENCE
+  return clamp((cityRate * p) / NEUTRAL_PROMINENCE, MIN_PRIOR_RATE, MAX_PRIOR_RATE)
+}
+
 // Bayesian-smoothed engagement rate for an event: engagements over impressions,
-// pulled toward the city average by `priorStrength` pseudo-observations. With no
-// data it equals the city rate; it needs real volume to move off it, so a single
-// lucky click on a barely-shown event can't top the rail.
+// pulled toward the prior mean by `priorStrength` pseudo-observations. With no
+// data it equals that prior; it needs real volume to move off it, so a single
+// lucky click on a barely-shown event can't top the rail. Pass priorRate(...) as
+// `cityRate` to smooth toward the event's own prominence instead of the flat
+// city average.
 export function bayesianEngagementScore(
   engagements: number,
   impressions: number,

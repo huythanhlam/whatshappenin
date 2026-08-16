@@ -10,6 +10,7 @@
     "migrate": "tsx scripts/migrate.ts",
     "backfill-geocode": "tsx scripts/backfill-geocode.ts",
     "backfill-embeddings": "tsx scripts/backfill-embeddings.ts",
+    "backfill-prominence": "tsx scripts/backfill-prominence.ts",
     "test": "vitest run"
   },
   "dependencies": {

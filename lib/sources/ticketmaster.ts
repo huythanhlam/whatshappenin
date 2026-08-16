@@ -1,8 +1,42 @@
-import type { RawEvent } from './types'
+import type { EventSignals, RawEvent } from './types'
 
 // Ticketmaster Discovery API — image-rich Austin events. Free key at
 // https://developer.ticketmaster.com. Returns [] when no key is configured.
 type TmImage = { url: string; ratio?: string; width?: number }
+
+type TmAttraction = {
+  name?: string
+  upcomingEvents?: { _total?: number }
+}
+
+// Ticketmaster publishes no popularity index of its own, so what's harvested
+// here is circumstantial: who is playing, how many dates that act has on the
+// books (touring scale), and where the event sits in its ticketing lifecycle.
+// `upcomingEvents` is not guaranteed on attractions embedded in a search
+// response; when it's missing the sub-signal is simply omitted.
+function buildSignals(ev: Record<string, unknown>): EventSignals | null {
+  const attractions = (ev._embedded as { attractions?: TmAttraction[] } | undefined)?.attractions ?? []
+  const names = attractions.map(a => a.name).filter((n): n is string => !!n)
+  const headlinerDates = attractions[0]?.upcomingEvents?._total
+
+  const signals: EventSignals = {}
+  if (names.length) signals.performers = names
+  if (typeof headlinerDates === 'number') signals.performerUpcomingEvents = headlinerDates
+
+  const status = (ev.dates as { status?: { code?: string } } | undefined)?.status?.code
+  if (status === 'onsale' || status === 'offsale' || status === 'cancelled') {
+    signals.ticketStatus = status
+  }
+
+  // Public onsale time. Required to read `offsale` as a sellout rather than as
+  // "tickets haven't been released yet" — Ticketmaster uses the one code for
+  // both, and without this every unannounced show scores as sold out.
+  const salesStart = (ev.sales as { public?: { startDateTime?: string } } | undefined)?.public
+    ?.startDateTime
+  if (salesStart) signals.salesStartTime = salesStart
+
+  return Object.keys(signals).length > 0 ? signals : null
+}
 
 function bestImage(images: TmImage[] | undefined): string | null {
   if (!images || images.length === 0) return null
@@ -66,6 +100,7 @@ export async function fetchTicketmasterEvents(city: { name: string; state: strin
         is_free: false,
         price_min: priceRanges?.[0]?.min ?? null,
         price_max: priceRanges?.[0]?.max ?? null,
+        signals: buildSignals(ev),
       })
     }
 

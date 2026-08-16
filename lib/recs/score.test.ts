@@ -3,10 +3,11 @@ import {
   computeFeatures,
   scoreFeatures,
   rankCandidates,
+  trendingScore,
   type Candidate,
   type ActorTaste,
 } from './score'
-import { V1_MODEL_WEIGHTS } from './config'
+import { V1_MODEL_WEIGHTS, V2_MODEL_WEIGHTS } from './config'
 
 const NOW = new Date('2026-07-17T12:00:00Z').getTime()
 
@@ -14,6 +15,7 @@ function cand(id: string, over: Partial<Candidate> = {}): Candidate {
   return {
     id,
     categorySlugs: ['music'],
+    titleNorm: `title-${id}`,
     venueNorm: `venue-${id}`,
     neighborhood: null,
     isFree: false,
@@ -21,6 +23,8 @@ function cand(id: string, over: Partial<Candidate> = {}): Candidate {
     engagementScore: 0.1,
     embedding: null,
     seenCount: 0,
+    prominence: null,
+    velocity: null,
     ...over,
   }
 }
@@ -125,5 +129,140 @@ describe('rankCandidates', () => {
     const ranked = rankCandidates(cands, taste(), { weights: V1_MODEL_WEIGHTS, nowMs: NOW, limit: 12 })
     expect(ranked).toHaveLength(12)
     expect(ranked.map(r => r.position)).toEqual([...Array(12).keys()])
+  })
+})
+
+describe('scoreFeatures with a model that predates a feature', () => {
+  it('treats a missing weight as zero rather than producing NaN', () => {
+    // V1 carries no prominence/velocity weights — the state of every database
+    // stuck at the legacy migration ceiling. Serving must still rank.
+    const features = computeFeatures(cand('a', { prominence: 0.9, velocity: 0.7 }), taste(), NOW)
+    expect(Number.isFinite(scoreFeatures(features, V1_MODEL_WEIGHTS))).toBe(true)
+  })
+
+  it('scores prominence identically under v1 regardless of its value', () => {
+    const high = computeFeatures(cand('a', { prominence: 0.9 }), taste(), NOW)
+    const low = computeFeatures(cand('b', { prominence: 0.0 }), taste(), NOW)
+    expect(scoreFeatures(high, V1_MODEL_WEIGHTS)).toBe(scoreFeatures(low, V1_MODEL_WEIGHTS))
+    // ...but v2, which carries the weight, must separate them.
+    expect(scoreFeatures(high, V2_MODEL_WEIGHTS)).toBeGreaterThan(scoreFeatures(low, V2_MODEL_WEIGHTS))
+  })
+})
+
+describe('trendingScore', () => {
+  const soon = new Date(NOW + 2 * 86_400_000).toISOString()
+  const far = new Date(NOW + 40 * 86_400_000).toISOString()
+
+  it('ranks a prominent event above an obscure one at the same date', () => {
+    const big = trendingScore(cand('a', { startTime: soon, prominence: 0.9 }), NOW)
+    const small = trendingScore(cand('b', { startTime: soon, prominence: 0.05 }), NOW)
+    expect(big).toBeGreaterThan(small)
+  })
+
+  it('weighs a rising event above a merely famous one', () => {
+    // The whole point of a trending rail: movement beats a standing reputation.
+    const rising = trendingScore(cand('a', { startTime: soon, prominence: 0.4, velocity: 0.9 }), NOW)
+    const famous = trendingScore(cand('b', { startTime: soon, prominence: 0.9, velocity: 0.0 }), NOW)
+    expect(rising).toBeGreaterThan(famous)
+  })
+
+  it('decays a distant event below an equally popular near one', () => {
+    const near = trendingScore(cand('a', { startTime: soon, prominence: 0.8 }), NOW)
+    const distant = trendingScore(cand('b', { startTime: far, prominence: 0.8 }), NOW)
+    expect(near).toBeGreaterThan(distant)
+  })
+
+  it('treats missing columns as neutral prominence, not zero', () => {
+    // On a legacy-ceiling database every candidate has null prominence; they
+    // must tie on popularity and be separated only by date, not all score 0.
+    const a = trendingScore(cand('a', { startTime: soon }), NOW)
+    const b = trendingScore(cand('b', { startTime: soon }), NOW)
+    expect(a).toBe(b)
+    expect(a).toBeGreaterThan(0)
+  })
+
+  it('surfaces a marquee event that has zero first-party engagement', () => {
+    // The cold-start case this feature exists for: nobody has clicked the arena
+    // show, everyone has clicked the recurring trivia night.
+    const arena = cand('arena', { startTime: soon, prominence: 0.95, engagementScore: 0 })
+    const regular = cand('regular', { startTime: soon, prominence: 0.1, engagementScore: 0.8 })
+    const ranked = rankCandidates([regular, arena], taste(), {
+      weights: V2_MODEL_WEIGHTS,
+      nowMs: NOW,
+      limit: 2,
+      exploreSlots: 0,
+      trending: true,
+    })
+    expect(ranked[0].id).toBe('arena')
+  })
+})
+
+describe('multi-date run collapse', () => {
+  // A month-long exhibition is stored as one event per date — correctly, since
+  // each date is separately attendable — but a rail must show it once.
+  function run(id: string, day: number): Candidate {
+    return cand(id, {
+      titleNorm: 'the art of banksy without limits',
+      venueNorm: 'fair market',
+      startTime: new Date(NOW + day * 86_400_000).toISOString(),
+      categorySlugs: ['arts'],
+    })
+  }
+
+  it('shows a multi-date run once', () => {
+    const ranked = rankCandidates([run('d1', 1), run('d2', 2), run('d3', 3)], taste(), {
+      weights: V2_MODEL_WEIGHTS, nowMs: NOW, limit: 10, exploreSlots: 0,
+    })
+    expect(ranked).toHaveLength(1)
+  })
+
+  it('keeps the soonest date, whatever order they arrive in', () => {
+    const ranked = rankCandidates([run('late', 9), run('early', 1), run('mid', 4)], taste(), {
+      weights: V2_MODEL_WEIGHTS, nowMs: NOW, limit: 10, exploreSlots: 0,
+    })
+    expect(ranked.map(r => r.id)).toEqual(['early'])
+  })
+
+  it('frees the slots for other events', () => {
+    const cands = [run('d1', 1), run('d2', 2), run('d3', 3), run('d4', 4),
+      cand('other1', { categorySlugs: ['comedy'] }), cand('other2', { categorySlugs: ['sports'] })]
+    const ranked = rankCandidates(cands, taste(), {
+      weights: V2_MODEL_WEIGHTS, nowMs: NOW, limit: 3, exploreSlots: 0,
+    })
+    expect(ranked).toHaveLength(3)
+    expect(new Set(ranked.map(r => r.id)).size).toBe(3)
+    expect(ranked.filter(r => r.id.startsWith('d')).length).toBe(1)
+  })
+
+  it('does not merge the same title at a different venue', () => {
+    // A touring show playing two rooms is two real, separately-attendable events.
+    const a = cand('a', { titleNorm: 'come from away', venueNorm: 'zach theatre' })
+    const b = cand('b', { titleNorm: 'come from away', venueNorm: 'bass concert hall' })
+    const ranked = rankCandidates([a, b], taste(), {
+      weights: V2_MODEL_WEIGHTS, nowMs: NOW, limit: 10, exploreSlots: 0, venueCap: 9,
+    })
+    expect(ranked).toHaveLength(2)
+  })
+
+  it('never groups rows with a null title_norm together', () => {
+    // Null is "unknown", not a shared key — grouping on it would collapse every
+    // un-normalized event in the catalog into a single rail entry.
+    const cands = [
+      cand('n1', { titleNorm: null, venueNorm: null }),
+      cand('n2', { titleNorm: null, venueNorm: null }),
+      cand('n3', { titleNorm: null, venueNorm: null }),
+    ]
+    const ranked = rankCandidates(cands, taste(), {
+      weights: V2_MODEL_WEIGHTS, nowMs: NOW, limit: 10, exploreSlots: 0, venueCap: 9,
+    })
+    expect(ranked).toHaveLength(3)
+  })
+
+  it('can be turned off', () => {
+    const ranked = rankCandidates([run('d1', 1), run('d2', 2)], taste(), {
+      weights: V2_MODEL_WEIGHTS, nowMs: NOW, limit: 10, exploreSlots: 0,
+      collapseSeries: false, venueCap: 9,
+    })
+    expect(ranked).toHaveLength(2)
   })
 })
