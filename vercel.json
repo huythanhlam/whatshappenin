@@ -1,20 +1,44 @@
 {
   "crons": [
     {
-      "path": "/api/ingest?city=austin&exclude=crawl:meetup-com&shard=0/2",
+      "path": "/api/ingest?city=austin&exclude=crawl:meetup-com&shard=0/6",
       "schedule": "0 6 * * *"
     },
     {
-      "path": "/api/ingest?city=austin&exclude=crawl:meetup-com&shard=1/2",
+      "path": "/api/ingest?city=austin&exclude=crawl:meetup-com&shard=1/6",
       "schedule": "10 6 * * *"
     },
     {
-      "path": "/api/ingest?city=houston",
+      "path": "/api/ingest?city=austin&exclude=crawl:meetup-com&shard=2/6",
       "schedule": "20 6 * * *"
     },
     {
-      "path": "/api/ingest?city=austin&source=crawl:meetup-com",
+      "path": "/api/ingest?city=austin&exclude=crawl:meetup-com&shard=3/6",
       "schedule": "30 6 * * *"
+    },
+    {
+      "path": "/api/ingest?city=austin&exclude=crawl:meetup-com&shard=4/6",
+      "schedule": "40 6 * * *"
+    },
+    {
+      "path": "/api/ingest?city=austin&exclude=crawl:meetup-com&shard=5/6",
+      "schedule": "50 6 * * *"
+    },
+    {
+      "path": "/api/ingest?city=houston&shard=0/3",
+      "schedule": "0 7 * * *"
+    },
+    {
+      "path": "/api/ingest?city=houston&shard=1/3",
+      "schedule": "10 7 * * *"
+    },
+    {
+      "path": "/api/ingest?city=houston&shard=2/3",
+      "schedule": "20 7 * * *"
+    },
+    {
+      "path": "/api/ingest?city=austin&source=crawl:meetup-com",
+      "schedule": "30 7 * * *"
     },
     {
       "path": "/api/email/digest?frequency=daily",
