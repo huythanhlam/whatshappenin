@@ -9,6 +9,12 @@ import {
   RECS_DEFAULT_LIMIT,
   RECS_EXPLORE_SLOTS,
   POSITIVE_ENGAGEMENT_TYPES,
+  TRENDING_WINDOW_DAYS,
+  TRENDING_MARQUEE_SLOTS,
+  TRENDING_MARQUEE_POOL,
+  TRENDING_PROMINENCE_WEIGHT,
+  TRENDING_VELOCITY_WEIGHT,
+  TRENDING_HALFLIFE_DAYS,
   type ModelWeights,
 } from '@/lib/recs/config'
 import {
@@ -1011,15 +1017,16 @@ export async function setEventProminence(
   }
 }
 
-// How many distinct sources describe this event — the corroboration signal.
-// Five outlets covering one show is itself evidence of significance.
-export async function countEventSources(eventId: string): Promise<number> {
+// The distinct sources describing this event. Serves two prominence signals at
+// once: the COUNT is corroboration (five outlets covering one show is itself
+// evidence), and the NAMES give the editorial strength (see editorialStrength).
+export async function listEventSourceNames(eventId: string): Promise<string[]> {
   const db = await getDb()
-  const rows = await db.query<{ n: string | number }>(
-    `SELECT count(*) AS n FROM event_sources WHERE event_id = $1`,
+  const rows = await db.query<{ source: string }>(
+    `SELECT DISTINCT source FROM event_sources WHERE event_id = $1`,
     [eventId]
   )
-  return Number(rows[0]?.n ?? 0)
+  return rows.map(r => r.source)
 }
 
 // Venue capacity from the hand-seeded `venues.capacity` column.
@@ -1224,7 +1231,10 @@ export async function listRecommendedEvents(
   const limit = opts.limit ?? RECS_DEFAULT_LIMIT
   const nowIso = new Date().toISOString()
   const nowMs = Date.now()
-  const toIso = new Date(nowMs + RECS_WINDOW_DAYS * 86_400_000).toISOString()
+  // Trending looks much further ahead than the personalized feed — see
+  // TRENDING_WINDOW_DAYS for why.
+  const windowDays = opts.trending ? TRENDING_WINDOW_DAYS : RECS_WINDOW_DAYS
+  const toIso = new Date(nowMs + windowDays * 86_400_000).toISOString()
 
   const model = await getActiveModel()
   if (!model) return { events: [], impressions: [], modelVersion: 0, personalized: false }
@@ -1232,18 +1242,68 @@ export async function listRecommendedEvents(
   // Candidate catalog read (public event metadata, on the pg service path). The
   // actor's taste + event-state come from the caller (the RLS-scoped Supabase
   // client), so serving stays a pure assembly + ranking step.
-  const rows = await db.query<Record<string, unknown>>(
-    `SELECT e.*, ${CATEGORIES_JSON}, ${FEATURED_JSON},
-       ee.score AS engagement_score, v.neighborhood
-     FROM events e
+  //
+  // The ORDER BY decides WHICH candidates survive RECS_CANDIDATE_CAP, so it has
+  // to match what the surface ranks by. Sorting by start_time and then taking
+  // the first 300 is right for the personalized feed (soonest-first is roughly
+  // its own ranking) but would silently defeat the wide trending window: 300
+  // soonest events in Austin is about the next five days, so every distant
+  // arena show — the entire reason for the wider window — would be cut before
+  // scoring. Trending therefore pre-ranks in SQL with the same formula
+  // trendingScore applies in TS.
+  const trendingOrder = `(${TRENDING_PROMINENCE_WEIGHT} * e.prominence + ${TRENDING_VELOCITY_WEIGHT} * e.velocity)
+       * power(0.5, EXTRACT(EPOCH FROM (e.start_time - NOW())) / 86400.0 / ${TRENDING_HALFLIFE_DAYS}) DESC`
+
+  const SELECT_COLS = `e.*, ${CATEGORIES_JSON}, ${FEATURED_JSON},
+       ee.score AS engagement_score, v.neighborhood`
+  const JOINS = `FROM events e
      LEFT JOIN event_engagement ee ON ee.event_id = e.id
-     LEFT JOIN venues v ON v.city_id = e.city_id AND v.venue_norm = e.venue_norm AND v.status = 'ok'
+     LEFT JOIN venues v ON v.city_id = e.city_id AND v.venue_norm = e.venue_norm AND v.status = 'ok'`
+
+  const dateOrderedSql =
+    `SELECT ${SELECT_COLS} ${JOINS}
      WHERE e.city_id = $1 AND e.status = 'approved'
        AND e.start_time >= $2 AND e.start_time <= $3
      ORDER BY e.start_time ASC
-     LIMIT $4`,
-    [cityId, nowIso, toIso, RECS_CANDIDATE_CAP]
-  )
+     LIMIT $4`
+
+  // Trending needs TWO candidate sets, unioned, because the rail has two jobs.
+  //
+  //   by_trend      — what's hot now (decayed score); the bulk of the rail.
+  //   by_prominence — the biggest events in town irrespective of date.
+  //
+  // Without the second set the reserved marquee slots are literally unfillable:
+  // the decayed ordering drops a stadium show a month out far below the
+  // candidate cap, so the marquee picker never sees it and quietly falls back to
+  // whatever near-term event happens to rank highest. Observed exactly that —
+  // the slots filled with ZZ Top while the top-prominence event in the city was
+  // absent from the candidate set entirely.
+  const trendingSql =
+    `WITH pool AS (
+       SELECT e.id, e.prominence, e.velocity, e.start_time
+       FROM events e
+       WHERE e.city_id = $1 AND e.status = 'approved'
+         AND e.start_time >= $2 AND e.start_time <= $3
+     ),
+     by_trend AS (SELECT e.id FROM pool e ORDER BY ${trendingOrder} LIMIT $4),
+     by_prominence AS (SELECT id FROM pool ORDER BY prominence DESC NULLS LAST LIMIT $5)
+     SELECT ${SELECT_COLS} ${JOINS}
+     WHERE e.id IN (SELECT id FROM by_trend UNION SELECT id FROM by_prominence)`
+
+  const params = [cityId, nowIso, toIso, RECS_CANDIDATE_CAP]
+  let rows: Record<string, unknown>[]
+  try {
+    rows = opts.trending
+      ? await db.query<Record<string, unknown>>(trendingSql, [...params, TRENDING_MARQUEE_POOL])
+      : await db.query<Record<string, unknown>>(dateOrderedSql, params)
+  } catch {
+    // The trending ordering names prominence/velocity explicitly, so it fails on
+    // a database below the legacy migration ceiling where those columns don't
+    // exist. Fall back to the date ordering, which every database supports —
+    // trending then degrades to "soonest first", exactly as it behaved before
+    // this feature.
+    rows = await db.query<Record<string, unknown>>(dateOrderedSql, params)
+  }
 
   // Split each row into a scoring Candidate and a render row (embedding stripped
   // so a 768-float array never ships to the client).
@@ -1280,6 +1340,7 @@ export async function listRecommendedEvents(
     limit,
     exploreSlots: RECS_EXPLORE_SLOTS,
     trending: opts.trending,
+    marqueeSlots: opts.trending ? TRENDING_MARQUEE_SLOTS : 0,
   })
 
   const events = ranked.map(r => enrichRow(renderById.get(r.id)!, nowIso))

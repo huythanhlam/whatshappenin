@@ -11,11 +11,11 @@
 // NEUTRAL_PROMINENCE — exactly the behaviour that predated this feature.
 
 import type { RawEvent } from '../sources/types'
-import { countEventSources, getVenueCapacity, setEventProminence } from '../db'
+import { listEventSourceNames, getVenueCapacity, setEventProminence } from '../db'
 import { computeProminence } from './prominence'
 import { normalizeArtist, resolveArtistFame } from './artists'
 import { capacityForVenue } from './venue-capacity'
-import { isEditorialSource } from './config'
+import { editorialStrength } from './config'
 
 // Per-batch caches. Venues repeat heavily within one ingest run (many events at
 // the same handful of rooms), so capacity is looked up once per venue rather
@@ -68,9 +68,9 @@ export async function scoreAndStoreProminence(
     // The artist lookup is the only network call here, and it only fires for
     // events that actually name a performer — i.e. the ticketing sources. Its
     // own cache collapses a whole tour into one Spotify request.
-    const [artist, sourceCount, venueCapacity] = await Promise.all([
+    const [artist, sourceNames, venueCapacity] = await Promise.all([
       resolveArtistFame(signals?.performers),
-      countEventSources(eventId),
+      listEventSourceNames(eventId),
       capacityFor(batch, ctx.cityId, ctx.venueNorm),
     ])
 
@@ -78,8 +78,8 @@ export async function scoreAndStoreProminence(
       signals,
       artist,
       venueCapacity,
-      sourceCount,
-      editorialPick: isEditorialSource(raw.source),
+      sourceCount: sourceNames.length,
+      editorialStrength: editorialStrength(sourceNames),
       priceMin: raw.price_min,
       startTime: raw.start_time,
     })

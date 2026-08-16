@@ -18,7 +18,7 @@
 import { getEventsForProminenceBackfill, getVenueCapacity, setEventProminence } from '@/lib/db'
 import { computeProminence } from '@/lib/recs/prominence'
 import { normalizeArtist, resolveArtistFame, titleArtistCandidates } from '@/lib/recs/artists'
-import { isEditorialSource } from '@/lib/recs/config'
+import { editorialStrength } from '@/lib/recs/config'
 import { capacityForVenue } from '@/lib/recs/venue-capacity'
 import type { EventSignals } from '@/lib/sources/types'
 
@@ -86,7 +86,7 @@ async function main() {
         artist: await resolveArtistFame(candidates),
         venueCapacity: capacity,
         sourceCount: (row.sources ?? []).length,
-        editorialPick: (row.sources ?? []).some(isEditorialSource),
+        editorialStrength: editorialStrength(row.sources ?? []),
         priceMin: row.price_min,
         startTime: row.start_time,
       })

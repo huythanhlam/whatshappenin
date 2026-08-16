@@ -113,19 +113,44 @@ export const RECS_DEFAULT_LIMIT = 20
 export const RECS_EXPLORE_SLOTS = 2
 
 // --- Editorial curation -----------------------------------------------------
-// Sources whose listings are a human editor's pick rather than an exhaustive
-// calendar dump. Being chosen by one of these is a real popularity signal — it's
-// a local expert asserting the event matters — so it feeds prominence. Matched
-// against `sources.name` / RawEvent.source. Keep this narrow: a source that
-// lists everything in town belongs nowhere near it.
-export const EDITORIAL_SOURCES: ReadonlySet<string> = new Set([
-  'crawl:calendar-austinchronicle-com', // Chronicle Staff Picks
-  'crawl:austinmonthly-com',
-  'crawl:austin-culturemap-com',
-])
+// How much an appearance in each publication actually says about an event.
+//
+// This started as a boolean — "is this source editorial?" — and that was wrong
+// in a way only production data showed. An editorial mention is evidence
+// *because it is selective*: a curator picking 20 things out of a city's 1,500
+// is making a strong statement, while a magazine's monthly calendar listing 240
+// of them is barely making one. Scoring both as 1.0 meant the signal fired on
+// ~22% of the upcoming Austin catalog, which is not a distinction at all — it
+// flooded the middle of the trending rail with beginner yoga and paint nights
+// whose ONLY evidence was "appeared in a listings calendar".
+//
+// Strength is therefore graded by measured selectivity — the share of the
+// upcoming catalog each source lists (Austin, 2026-08-16, 1,557 events):
+//
+//   crawl:calendar-austinchronicle-com   Staff Picks, a hand-picked shortlist
+//   crawl:austinmonthly-com              238 events, 15.3% — a full calendar
+//   crawl:austin-culturemap-com          119 events,  7.6% — a full calendar
+//
+// Re-measure when adding a source: a broad listings feed that creeps in at full
+// strength quietly degrades the whole rail. The query is a count of distinct
+// upcoming events per `event_sources.source` over the city's catalog size.
+export const EDITORIAL_STRENGTH: Readonly<Record<string, number>> = {
+  // A genuine shortlist: an editor choosing a handful of things worth doing.
+  'crawl:calendar-austinchronicle-com': 1.0,
+  // Roundup calendars. Being listed is mildly positive — someone decided it was
+  // worth typing up — but it is nothing like a pick, and these two alone cover
+  // nearly a quarter of the catalog between them.
+  'crawl:austin-culturemap-com': 0.3,
+  'crawl:austinmonthly-com': 0.2,
+}
 
-export function isEditorialSource(source: string | null | undefined): boolean {
-  return !!source && EDITORIAL_SOURCES.has(source)
+// The strongest editorial claim any of an event's sources makes, in [0,1].
+// 0 means no editorial source listed it, which prominence reads as no evidence
+// rather than as negative evidence.
+export function editorialStrength(sources: readonly string[]): number {
+  let best = 0
+  for (const s of sources) best = Math.max(best, EDITORIAL_STRENGTH[s] ?? 0)
+  return best
 }
 
 // --- Trending ---------------------------------------------------------------
@@ -137,6 +162,52 @@ export function isEditorialSource(source: string | null | undefined): boolean {
 // the calendar for three months is *popular*, but the thing rising this week is
 // what "trending" is supposed to surface. Prominence keeps a real weight so the
 // rail isn't empty of marquee events in a quiet week.
+// How far ahead trending looks. Deliberately much wider than RECS_WINDOW_DAYS:
+// the two surfaces answer different questions. The personalized feed answers
+// "what should I do this week", so a fortnight is right. Trending answers
+// "what's big right now", and arena shows go on sale MONTHS ahead — the moment a
+// tour date drops is exactly when demand spikes and when a user most wants to
+// hear about it. At 14 days the rail was blind to 66 of Austin's 83
+// highest-prominence events, including every one above 0.75.
+//
+// This does not flood the rail with distant events: TRENDING_HALFLIFE_DAYS
+// decay means something 60 days out keeps under 2% of its score, so it has to be
+// genuinely enormous to outrank a decent event this week.
+export const TRENDING_WINDOW_DAYS = 60
+
+// Slots in the trending rail reserved for the biggest events in town regardless
+// of how far off they are.
+//
+// Recency decay and raw scale can't be reconciled by one number: prominence has
+// narrow dynamic range (Austin's biggest event scores ~1.4x a merely good one),
+// while a 10-day half-life costs a factor of ~6 over a month. Any half-life
+// short enough to keep the rail about *this week* buries a stadium show a month
+// out; any half-life long enough to surface it stops the rail being about now.
+//
+// So the rail answers both questions explicitly instead of compromising: most
+// slots rank by trendingScore as before, and a few are held for sheer scale.
+// Same shape as RECS_EXPLORE_SLOTS.
+export const TRENDING_MARQUEE_SLOTS = 3
+
+// How many top-prominence events are pulled into the candidate set *in addition*
+// to the ones the trending ordering selects.
+//
+// Without this the reserved slots are unreachable: RECS_CANDIDATE_CAP is applied
+// in SQL using the decayed trending order, so a stadium show a month out — the
+// exact thing the slots exist for — is cut before scoring ever runs. The
+// candidate query therefore unions "top N by trending score" with "top M by raw
+// prominence", so both halves of the rail can actually be filled.
+export const TRENDING_MARQUEE_POOL = 50
+
+// Where the reserved block lands. Not the very top — the hottest current event
+// should still lead — but high enough to be seen rather than buried at slot 18.
+export const TRENDING_MARQUEE_INSERT_AT = 2
+
+// A reserved slot is only worth spending on a genuinely big event. Below this,
+// the slots go unused and normal ranking fills them, so a quiet catalog doesn't
+// get an arbitrary "marquee" section of mediocre events.
+export const TRENDING_MARQUEE_MIN_PROMINENCE = 0.5
+
 export const TRENDING_PROMINENCE_WEIGHT = 1.0
 export const TRENDING_VELOCITY_WEIGHT = 1.6
 // Recency half-life (days) applied to trending: of two equally popular events,

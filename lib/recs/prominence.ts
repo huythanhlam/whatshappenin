@@ -36,8 +36,10 @@ export type ProminenceInput = {
   // How many distinct sources describe this event (rows in `event_sources`).
   // Five outlets covering one show is itself evidence of significance.
   sourceCount?: number | null
-  // Whether a human curator picked it (Chronicle Staff Pick, CultureMap, etc.).
-  editorialPick?: boolean
+  // How strong an editorial claim was made about this event, in [0,1] — see
+  // editorialStrength(). Graded rather than boolean because a hand-picked
+  // shortlist and a monthly listings calendar are not the same evidence.
+  editorialStrength?: number
   // Ticket price floor — a demand proxy, since promoters price to expected pull.
   priceMin?: number | null
   // Event start, needed to read `ticketStatus`: 'offsale' means sold out only if
@@ -168,10 +170,12 @@ export function prominenceParts(input: ProminenceInput): Part[] {
     add('corroboration', logNorm(input.sourceCount, 1, 6))
   }
 
-  // Only a positive pick counts. `editorialPick: false` means "no curator
-  // touched this", which is the default state of nearly everything — scoring it
-  // as a zero would punish the entire non-curated catalog.
-  if (input.editorialPick) add('editorial', 1)
+  // Only a positive claim counts. A strength of 0 means "no editorial source
+  // listed this", which is the default state of nearly everything — recording it
+  // as a zero-valued part would punish the entire non-curated catalog.
+  if (input.editorialStrength && input.editorialStrength > 0) {
+    add('editorial', input.editorialStrength)
+  }
 
   if (typeof input.priceMin === 'number' && input.priceMin > 0) {
     add('priceFloor', logNorm(input.priceMin, 10, 200))
