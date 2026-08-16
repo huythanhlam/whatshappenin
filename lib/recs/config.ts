@@ -112,11 +112,43 @@ export const RECS_CANDIDATE_CAP = 300
 export const RECS_DEFAULT_LIMIT = 20
 export const RECS_EXPLORE_SLOTS = 2
 
+// --- Editorial curation -----------------------------------------------------
+// Sources whose listings are a human editor's pick rather than an exhaustive
+// calendar dump. Being chosen by one of these is a real popularity signal — it's
+// a local expert asserting the event matters — so it feeds prominence. Matched
+// against `sources.name` / RawEvent.source. Keep this narrow: a source that
+// lists everything in town belongs nowhere near it.
+export const EDITORIAL_SOURCES: ReadonlySet<string> = new Set([
+  'crawl:calendar-austinchronicle-com', // Chronicle Staff Picks
+  'crawl:austinmonthly-com',
+  'crawl:austin-culturemap-com',
+])
+
+export function isEditorialSource(source: string | null | undefined): boolean {
+  return !!source && EDITORIAL_SOURCES.has(source)
+}
+
+// --- Trending ---------------------------------------------------------------
+// The `mode=trending` surface doesn't run the personalization model (there is no
+// taste to personalize against); it ranks on world-popularity alone. These size
+// that blend. See trendingScore() in lib/recs/score.ts.
+//
+// Velocity outweighs prominence here — a big-name show that has been sitting on
+// the calendar for three months is *popular*, but the thing rising this week is
+// what "trending" is supposed to surface. Prominence keeps a real weight so the
+// rail isn't empty of marquee events in a quiet week.
+export const TRENDING_PROMINENCE_WEIGHT = 1.0
+export const TRENDING_VELOCITY_WEIGHT = 1.6
+// Recency half-life (days) applied to trending: of two equally popular events,
+// the sooner one wins, and something six weeks out doesn't crowd out this
+// weekend.
+export const TRENDING_HALFLIFE_DAYS = 10
+
 // --- The seeded model -------------------------------------------------------
-// v1 prior weights for the logistic-regression scorer. MUST match the seed in
-// supabase/migrations-legacy/031_ml.sql (a test asserts the active DB row equals this).
-// `embedding_sim` is present but its feature isn't computed until the embedding
-// column ships; the scorer treats an absent feature as 0.
+// Prior weights for the logistic-regression scorer, mirroring the active
+// `model_versions` row. `embedding_sim` is present but its feature isn't
+// computed until the embedding column ships; the scorer treats an absent feature
+// as 0.
 export type ModelWeights = {
   bias: number
   category_affinity: number
@@ -128,8 +160,19 @@ export type ModelWeights = {
   embedding_sim: number
   proximity: number
   seen_count: number
+  // Optional because a model row can predate a feature: code adds a feature key,
+  // the matching model version lands one migration later, and a legacy-ceiling
+  // dev database never gets it at all. scoreFeatures reads a missing weight as 0.
+  prominence?: number
+  velocity?: number
 }
 
+// v1 — the original seed, in supabase/migrations-legacy/031_ml.sql. Retired by
+// migration 046 but still the ACTIVE row on any database that stops at the
+// legacy ceiling (033), i.e. every PGlite dev instance. Kept here, and kept
+// without the two new keys, precisely to document that skew: scoreFeatures
+// treats a weight the active model doesn't carry as 0, so a v1 database ranks
+// exactly as it did before this feature existed rather than scoring NaN.
 export const V1_MODEL_WEIGHTS: ModelWeights = {
   bias: -2.0,
   category_affinity: 2.0,
@@ -141,4 +184,12 @@ export const V1_MODEL_WEIGHTS: ModelWeights = {
   embedding_sim: 1.2,
   proximity: 0.4,
   seen_count: -0.5,
+}
+
+// v2 — v1 plus the world-popularity features. MUST match the INSERT in
+// supabase/migrations/046_prominence_velocity.sql.
+export const V2_MODEL_WEIGHTS: ModelWeights = {
+  ...V1_MODEL_WEIGHTS,
+  prominence: 1.8,
+  velocity: 0.9,
 }

@@ -79,6 +79,8 @@ type SweatpalsResult = {
   isOnlineEvent?: unknown
   prices?: unknown
   attendeesLimit?: unknown
+  // How many have signed up. Feeds EventSignals.attendeeCount -> prominence.
+  participantsCount?: unknown
 }
 
 type DayParts = { y: number; m: number; d: number }
@@ -220,6 +222,12 @@ function toRawEvent(r: SweatpalsResult, source: string): RawEvent | null {
     is_free: r.isPaid !== true,
     price_min: min,
     price_max: max,
+    // How many people have actually signed up — the one popularity signal the
+    // non-ticketed long tail can supply. Restores what 706c8f0 had to strip when
+    // RawEvent had no `signals` field yet; EventSignals now exists, so this
+    // feeds prominence (see lib/recs/prominence.ts) for a whole class of events
+    // that no ticketing API or artist lookup can reach.
+    signals: typeof r.participantsCount === 'number' ? { attendeeCount: r.participantsCount } : null,
   }
 }
 

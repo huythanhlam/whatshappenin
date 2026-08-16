@@ -66,6 +66,12 @@ export type ExistingEvent = {
   // falls back to its static map, same as for RawEvent.
   source_kind?: SourceKind | null
   title: string
+  // The normalized match keys. Null on rows written before these columns
+  // existed, which makes the row invisible to findDedupCandidates — blocking is
+  // done ON them, so a null can never match anything and the event silently
+  // duplicates against every other source forever. persistOne repairs a null on
+  // the next ingest; see repairNorms there.
+  title_norm: string | null
   venue_norm: string | null
   description: string | null
   image_url: string | null

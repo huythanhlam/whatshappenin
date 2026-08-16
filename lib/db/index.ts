@@ -8,6 +8,7 @@ import {
   RECS_CANDIDATE_CAP,
   RECS_DEFAULT_LIMIT,
   RECS_EXPLORE_SLOTS,
+  POSITIVE_ENGAGEMENT_TYPES,
   type ModelWeights,
 } from '@/lib/recs/config'
 import {
@@ -16,6 +17,11 @@ import {
   type ActorTaste,
   type FeatureVector,
 } from '@/lib/recs/score'
+import {
+  computeVelocity,
+  RECENT_WINDOW_DAYS,
+  BASELINE_WINDOW_DAYS,
+} from '@/lib/recs/velocity'
 
 // Returns true when no direct Postgres connection is configured — the app then
 // runs against an embedded local Postgres (PGlite) so it works with zero
@@ -359,7 +365,7 @@ export async function insertEvent(
 export async function getEventRow(id: string): Promise<ExistingEvent | null> {
   const db = await getDb()
   const rows = await db.query<ExistingEvent>(
-    `SELECT e.source, e.source_id, e.title, e.venue_norm, e.description, e.image_url,
+    `SELECT e.source, e.source_id, e.title, e.title_norm, e.venue_norm, e.description, e.image_url,
             e.venue_name, e.venue_address, e.end_time, e.ticket_url, e.is_free,
             e.price_min, e.price_max, s.kind AS source_kind
      FROM events e
@@ -925,6 +931,270 @@ export async function getActiveModel(): Promise<{ id: number; weights: ModelWeig
 }
 
 // ---------------------------------------------------------------------------
+// Recommendations — world-popularity stores (prominence, artist fame, demand)
+//
+// Every function here degrades to a no-op/null when its table or column is
+// absent, because migration 046 lives above the legacy migration ceiling and so
+// never runs on a PGlite dev database — the same contract user_badges follows.
+// ---------------------------------------------------------------------------
+
+export type ArtistCacheRow = {
+  provider: string | null
+  external_id: string | null
+  popularity: number | null
+  followers: string | number | null
+  confidence: number
+  refreshed_at: string
+}
+
+export async function getCachedArtist(nameNorm: string): Promise<ArtistCacheRow | null> {
+  try {
+    const db = await getDb()
+    const rows = await db.query<ArtistCacheRow>(
+      `SELECT provider, external_id, popularity, followers, confidence, refreshed_at
+       FROM artists WHERE name_norm = $1`,
+      [nameNorm]
+    )
+    return rows[0] ?? null
+  } catch {
+    return null // table absent — caller proceeds without a cache
+  }
+}
+
+export async function upsertCachedArtist(row: {
+  nameNorm: string
+  displayName: string
+  provider: string | null
+  externalId: string | null
+  popularity: number | null
+  followers: number | null
+  confidence: number
+}): Promise<void> {
+  try {
+    const db = await getDb()
+    await db.query(
+      `INSERT INTO artists (name_norm, display_name, provider, external_id, popularity, followers, confidence, refreshed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+       ON CONFLICT (name_norm) DO UPDATE SET
+         display_name = EXCLUDED.display_name,
+         provider     = EXCLUDED.provider,
+         external_id  = EXCLUDED.external_id,
+         popularity   = EXCLUDED.popularity,
+         followers    = EXCLUDED.followers,
+         confidence   = EXCLUDED.confidence,
+         refreshed_at = NOW()`,
+      [row.nameNorm, row.displayName, row.provider, row.externalId, row.popularity, row.followers, row.confidence]
+    )
+  } catch {
+    // Table absent, or a write race with a concurrent ingest. The lookup already
+    // returned a usable answer; this is not worth failing an ingest over.
+  }
+}
+
+// Store an event's computed prominence alongside the headliner it resolved to.
+// Returns false when the columns don't exist, so the caller can log once rather
+// than per event.
+export async function setEventProminence(
+  eventId: string,
+  prominence: number,
+  headlinerNorm: string | null
+): Promise<boolean> {
+  try {
+    const db = await getDb()
+    await db.query(
+      `UPDATE events SET prominence = $2, headliner_norm = $3 WHERE id = $1`,
+      [eventId, prominence, headlinerNorm]
+    )
+    return true
+  } catch {
+    return false // columns absent (legacy-ceiling database)
+  }
+}
+
+// How many distinct sources describe this event — the corroboration signal.
+// Five outlets covering one show is itself evidence of significance.
+export async function countEventSources(eventId: string): Promise<number> {
+  const db = await getDb()
+  const rows = await db.query<{ n: string | number }>(
+    `SELECT count(*) AS n FROM event_sources WHERE event_id = $1`,
+    [eventId]
+  )
+  return Number(rows[0]?.n ?? 0)
+}
+
+// Venue capacity from the hand-seeded `venues.capacity` column.
+export async function getVenueCapacity(cityId: number, venueNorm: string | null): Promise<number | null> {
+  if (!venueNorm) return null
+  try {
+    const db = await getDb()
+    const rows = await db.query<{ capacity: number | null }>(
+      `SELECT capacity FROM venues WHERE city_id = $1 AND venue_norm = $2`,
+      [cityId, venueNorm]
+    )
+    return rows[0]?.capacity ?? null
+  } catch {
+    return null // column absent
+  }
+}
+
+// Recompute events.velocity for a city's upcoming window and store it.
+//
+// One query gathers each candidate's recent and baseline positive-interaction
+// counts plus the slope of its ticket supply, then the pure scorer in
+// lib/recs/velocity turns those into a number. Runs on a cron rather than
+// write-through because velocity is a comparison across a window — unlike the
+// engagement prior, there is no meaningful "bump this by one".
+//
+// Returns the number of events scored, or null when the column is absent.
+export async function recomputeCityVelocity(cityId: number): Promise<number | null> {
+  const db = await getDb()
+  const recentDays = RECENT_WINDOW_DAYS
+  const baselineDays = BASELINE_WINDOW_DAYS
+  const positiveTypes = [...POSITIVE_ENGAGEMENT_TYPES]
+
+  try {
+    const rows = await db.query<{
+      id: string
+      recent_count: string | number
+      baseline_count: string | number
+      drop_per_day: string | number | null
+    }>(
+      `WITH candidates AS (
+         SELECT id FROM events
+         WHERE city_id = $1 AND status = 'approved'
+           AND start_time >= NOW() AND start_time <= NOW() + ($4 || ' days')::interval
+       ),
+       counts AS (
+         SELECT c.id,
+           count(*) FILTER (
+             WHERE i.created_at >= NOW() - ($2 || ' days')::interval
+           ) AS recent_count,
+           count(*) FILTER (
+             WHERE i.created_at <  NOW() - ($2 || ' days')::interval
+               AND i.created_at >= NOW() - (($2::numeric + $3::numeric) || ' days')::interval
+           ) AS baseline_count
+         FROM candidates c
+         LEFT JOIN interactions i
+           ON i.event_id = c.id AND i.type = ANY($5)
+         GROUP BY c.id
+       ),
+       -- Supply slope from the two most recent observations of each event: the
+       -- fraction of remaining listings that disappeared, per day.
+       demand AS (
+         SELECT id,
+           CASE WHEN prev_count > 0 AND hours > 0
+                THEN ((prev_count - listing_count)::numeric / prev_count) / (hours / 24.0)
+                ELSE NULL END AS drop_per_day
+         FROM (
+           SELECT d.event_id AS id, d.listing_count,
+             lag(d.listing_count) OVER w AS prev_count,
+             EXTRACT(EPOCH FROM (d.observed_at - lag(d.observed_at) OVER w)) / 3600.0 AS hours,
+             row_number() OVER (PARTITION BY d.event_id ORDER BY d.observed_at DESC) AS rn
+           FROM event_demand d
+           JOIN candidates c ON c.id = d.event_id
+           WINDOW w AS (PARTITION BY d.event_id ORDER BY d.observed_at)
+         ) s
+         WHERE rn = 1
+       )
+       SELECT counts.id, counts.recent_count, counts.baseline_count, demand.drop_per_day
+       FROM counts LEFT JOIN demand ON demand.id = counts.id`,
+      [cityId, recentDays, baselineDays, RECS_WINDOW_DAYS, positiveTypes]
+    )
+
+    let scored = 0
+    for (const row of rows) {
+      const velocity = computeVelocity({
+        recentCount: Number(row.recent_count ?? 0),
+        baselineCount: Number(row.baseline_count ?? 0),
+        demandDropPerDay: row.drop_per_day === null ? null : Number(row.drop_per_day),
+      })
+      await db.query(`UPDATE events SET velocity = $2 WHERE id = $1`, [row.id, velocity])
+      scored++
+    }
+    return scored
+  } catch {
+    return null // column or event_demand table absent (legacy-ceiling database)
+  }
+}
+
+// Upcoming approved events with everything the prominence scorer needs, for the
+// backfill. Reads the stored provenance blob rather than re-fetching any source:
+// `event_sources.raw` is the RawEvent as ingested, signals included.
+export type ProminenceBackfillRow = {
+  id: string
+  title: string
+  city_id: number
+  venue_norm: string | null
+  start_time: string
+  price_min: number | null
+  sources: string[]
+  raws: unknown[]
+}
+
+export async function getEventsForProminenceBackfill(
+  limit: number,
+  afterId: string | null
+): Promise<ProminenceBackfillRow[]> {
+  const db = await getDb()
+  return db.query<ProminenceBackfillRow>(
+    `SELECT e.id, e.title, e.city_id, e.venue_norm, e.start_time, e.price_min,
+       coalesce(array_agg(s.source ORDER BY s.ingested_at), '{}') AS sources,
+       coalesce(json_agg(s.raw ORDER BY s.ingested_at) FILTER (WHERE s.raw IS NOT NULL), '[]'::json) AS raws
+     FROM events e
+     LEFT JOIN event_sources s ON s.event_id = e.id
+     WHERE e.status = 'approved' AND e.start_time >= NOW()
+       AND ($2::uuid IS NULL OR e.id > $2::uuid)
+     GROUP BY e.id
+     ORDER BY e.id
+     LIMIT $1`,
+    [limit, afterId]
+  )
+}
+
+// Upcoming events in a city that a given ticketing source knows about, with that
+// source's own id — the input to the demand poller. Ordered soonest-first so a
+// capped run polls the events whose supply is actually moving.
+export async function listTicketedEventIds(
+  cityId: number,
+  opts: { source: string; withinDays: number; limit: number }
+): Promise<{ eventId: string; externalId: string }[]> {
+  const db = await getDb()
+  const rows = await db.query<{ event_id: string; external_id: string }>(
+    `SELECT s.event_id, s.external_id
+     FROM event_sources s
+     JOIN events e ON e.id = s.event_id
+     WHERE s.source = $2 AND e.city_id = $1 AND e.status = 'approved'
+       AND e.start_time >= NOW() AND e.start_time <= NOW() + ($3 || ' days')::interval
+     ORDER BY e.start_time ASC
+     LIMIT $4`,
+    [cityId, opts.source, opts.withinDays, opts.limit]
+  )
+  return rows.map(r => ({ eventId: r.event_id, externalId: r.external_id }))
+}
+
+// Append one ticket-supply observation. Idempotent per (event, timestamp) by the
+// table's primary key; a same-instant duplicate is simply ignored.
+export async function recordEventDemand(obs: {
+  eventId: string
+  listingCount: number | null
+  avgPrice: number | null
+  status: string | null
+}): Promise<void> {
+  try {
+    const db = await getDb()
+    await db.query(
+      `INSERT INTO event_demand (event_id, listing_count, avg_price, status)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (event_id, observed_at) DO NOTHING`,
+      [obs.eventId, obs.listingCount, obs.avgPrice, obs.status]
+    )
+  } catch {
+    // Table absent — demand telemetry is additive; velocity falls back to the
+    // engagement channel alone.
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Recommendations — serving (the ranking model at request time)
 // ---------------------------------------------------------------------------
 
@@ -943,7 +1213,7 @@ export async function listRecommendedEvents(
   cityId: number,
   taste: ActorTaste,
   state: { hidden: Set<string>; seen: Map<string, number> },
-  opts: { limit?: number } = {}
+  opts: { limit?: number; trending?: boolean } = {}
 ): Promise<{
   events: EnrichedEvent[]
   impressions: RecImpressionItem[]
@@ -988,6 +1258,7 @@ export async function listRecommendedEvents(
     candidates.push({
       id,
       categorySlugs: ((row.categories as { slug: string }[] | null) ?? []).map(c => c.slug),
+      titleNorm: (row.title_norm as string | null) ?? null,
       venueNorm: (row.venue_norm as string | null) ?? null,
       neighborhood: (row.neighborhood as string | null) ?? null,
       isFree: !!row.is_free,
@@ -995,6 +1266,11 @@ export async function listRecommendedEvents(
       engagementScore: (row.engagement_score as number | null) ?? null,
       embedding,
       seenCount: state.seen.get(id) ?? 0,
+      // Selected via `e.*`, so these are simply absent — not an error — on a
+      // database below the legacy migration ceiling, where migration 046 hasn't
+      // run. computeFeatures reads a null prominence as NEUTRAL_PROMINENCE.
+      prominence: (row.prominence as number | null) ?? null,
+      velocity: (row.velocity as number | null) ?? null,
     })
   }
 
@@ -1003,6 +1279,7 @@ export async function listRecommendedEvents(
     nowMs,
     limit,
     exploreSlots: RECS_EXPLORE_SLOTS,
+    trending: opts.trending,
   })
 
   const events = ranked.map(r => enrichRow(renderById.get(r.id)!, nowIso))

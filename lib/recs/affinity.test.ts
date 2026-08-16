@@ -7,8 +7,39 @@ import {
   decay,
   dayOfWeekKey,
   affinityKeysForEvent,
+  priorRate,
+  MIN_PRIOR_RATE,
+  MAX_PRIOR_RATE,
 } from './affinity'
-import { SIGNAL_MAGNITUDE } from './config'
+import { SIGNAL_MAGNITUDE, DEFAULT_CITY_ENGAGEMENT_RATE } from './config'
+import { NEUTRAL_PROMINENCE } from './prominence'
+
+describe('priorRate', () => {
+  it('reproduces the old flat city rate for an event with no evidence', () => {
+    // The compatibility guarantee: prominence-unaware behaviour is unchanged.
+    expect(priorRate(NEUTRAL_PROMINENCE)).toBeCloseTo(DEFAULT_CITY_ENGAGEMENT_RATE)
+    expect(priorRate(null)).toBeCloseTo(DEFAULT_CITY_ENGAGEMENT_RATE)
+    expect(priorRate(undefined)).toBeCloseTo(DEFAULT_CITY_ENGAGEMENT_RATE)
+  })
+
+  it('gives a prominent event a higher prior than an obscure one', () => {
+    expect(priorRate(0.9)).toBeGreaterThan(priorRate(NEUTRAL_PROMINENCE))
+    expect(priorRate(0.02)).toBeLessThan(priorRate(NEUTRAL_PROMINENCE))
+  })
+
+  it('clamps so real observations can always overcome the prior', () => {
+    expect(priorRate(1)).toBeLessThanOrEqual(MAX_PRIOR_RATE)
+    expect(priorRate(0)).toBeGreaterThanOrEqual(MIN_PRIOR_RATE)
+  })
+
+  it('starts a cold marquee event above a cold ordinary one', () => {
+    // Both have zero impressions and zero engagements — the entire difference is
+    // the prior, which is the whole point.
+    const arena = bayesianEngagementScore(0, 0, priorRate(0.9))
+    const openMic = bayesianEngagementScore(0, 0, priorRate(0.1))
+    expect(arena).toBeGreaterThan(openMic)
+  })
+})
 
 describe('signalTarget', () => {
   it('saturates a favorite to +1 and a hide to -1', () => {

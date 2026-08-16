@@ -11,7 +11,13 @@
 import type { ModelWeights } from './config'
 import { dayOfWeekKey } from './affinity'
 import { cosine } from './embed'
-import { DEFAULT_CITY_ENGAGEMENT_RATE } from './config'
+import { NEUTRAL_PROMINENCE } from './prominence'
+import {
+  DEFAULT_CITY_ENGAGEMENT_RATE,
+  TRENDING_HALFLIFE_DAYS,
+  TRENDING_PROMINENCE_WEIGHT,
+  TRENDING_VELOCITY_WEIGHT,
+} from './config'
 
 // The feature vector. Keys match ModelWeights (minus bias). Kept as a plain
 // object so an impression can log exactly what was scored.
@@ -25,6 +31,10 @@ export type FeatureVector = {
   embedding_sim: number
   proximity: number
   seen_count: number
+  // World-popularity, independent of our own traffic. See lib/recs/prominence.ts
+  // and migration 046 for why these are separate from engagement_prior.
+  prominence: number
+  velocity: number
 }
 
 export const FEATURE_KEYS: (keyof FeatureVector)[] = [
@@ -37,12 +47,18 @@ export const FEATURE_KEYS: (keyof FeatureVector)[] = [
   'embedding_sim',
   'proximity',
   'seen_count',
+  'prominence',
+  'velocity',
 ]
 
 // A candidate event reduced to what scoring needs. lib/db builds these from SQL.
 export type Candidate = {
   id: string
   categorySlugs: string[]
+  // Normalized title, the series key. Two rows sharing it at the same venue are
+  // different DATES of one run, not different events. Null on rows predating the
+  // column, which collapseSeries treats as its own series (never grouped).
+  titleNorm: string | null
   venueNorm: string | null
   neighborhood: string | null
   isFree: boolean
@@ -50,6 +66,10 @@ export type Candidate = {
   engagementScore: number | null // event_engagement.score, null if never scored
   embedding: number[] | null
   seenCount: number // prior views of this event by the actor
+  // events.prominence / events.velocity. Null on a database below the legacy
+  // migration ceiling, where the columns don't exist yet (see migration 046).
+  prominence: number | null
+  velocity: number | null
 }
 
 // An actor's affinities as a flat map keyed "kind:value" → score, plus their
@@ -95,15 +115,43 @@ export function computeFeatures(c: Candidate, taste: ActorTaste, nowMs: number):
     embedding_sim: cosine(taste.vector, c.embedding),
     proximity: 1 / (1 + daysUntil),
     seen_count: c.seenCount,
+    prominence: c.prominence ?? NEUTRAL_PROMINENCE,
+    velocity: c.velocity ?? 0,
   }
 }
 
 // The model score: bias + Σ wᵢ·featureᵢ. Linear (pre-sigmoid) — monotonic in the
 // engagement probability, which is all ranking needs.
+//
+// A weight the active model version doesn't carry counts as 0, not NaN. Feature
+// keys are added in code and reach the database one migration later (and never
+// at all on a legacy-ceiling dev database), so serving has to tolerate a model
+// row that predates a feature — it simply ignores the column until a model
+// trained with it is promoted.
 export function scoreFeatures(features: FeatureVector, weights: ModelWeights): number {
   let s = weights.bias
-  for (const k of FEATURE_KEYS) s += weights[k] * features[k]
+  for (const k of FEATURE_KEYS) s += (weights[k] ?? 0) * features[k]
   return s
+}
+
+// The trending surface's ranking, which is deliberately NOT the model above.
+//
+// The model ranks by predicted engagement *for a given actor*; run with an empty
+// taste it degenerates into "whatever our existing users already clicked", which
+// is the closed loop this whole feature exists to escape. Trending instead ranks
+// on world-popularity and its rate of change, decayed toward the near future, so
+// a marquee show that nobody on the platform has touched yet can still lead the
+// rail on the day it's announced.
+export function trendingScore(c: Candidate, nowMs: number): number {
+  const startMs = new Date(c.startTime).getTime()
+  const daysUntil = Number.isNaN(startMs) ? 0 : Math.max(0, (startMs - nowMs) / 86_400_000)
+  const recency = Math.pow(0.5, daysUntil / TRENDING_HALFLIFE_DAYS)
+
+  const popularity =
+    TRENDING_PROMINENCE_WEIGHT * (c.prominence ?? NEUTRAL_PROMINENCE) +
+    TRENDING_VELOCITY_WEIGHT * (c.velocity ?? 0)
+
+  return popularity * recency
 }
 
 export type RankOptions = {
@@ -113,6 +161,51 @@ export type RankOptions = {
   exploreSlots?: number // slots reserved for exploration (default 2)
   categoryCap?: number // max events sharing a top category (default 3)
   venueCap?: number // max events sharing a venue (default 2)
+  // Collapse a multi-date run to its soonest showing (default true). See
+  // collapseSeries.
+  collapseSeries?: boolean
+  // Rank by trendingScore instead of the model. The feature vector is still
+  // computed and logged, so trending impressions remain usable training data —
+  // only the ordering differs.
+  trending?: boolean
+}
+
+// Collapse a multi-date run to a single entry.
+//
+// A month-long exhibition or a theatre run is stored as one event PER DATE, and
+// that is correct — each date is a real, separately-attendable event, so dedup
+// rightly refuses to merge them. But a rail is a list of things to do, not a
+// calendar: showing "The Art of Banksy" at slots 4 and 9 burns a slot and reads
+// as a bug. Observed in production: 195 upcoming Austin events belong to just 46
+// such series, and three of the first twenty rail slots were repeats.
+//
+// The kept date is the soonest, not the highest-scoring — within a series every
+// date scores near-identically, and the one a user can act on first is the
+// useful one. Candidates arrive ranked, so this preserves that order.
+function collapseSeries(candidates: Candidate[]): Candidate[] {
+  const soonestBySeries = new Map<string, Candidate>()
+  const out: Candidate[] = []
+
+  for (const c of candidates) {
+    // A null title_norm can't be grouped safely — it would collapse every such
+    // row into one bucket — so those pass through untouched.
+    if (!c.titleNorm) {
+      out.push(c)
+      continue
+    }
+    const key = `${c.titleNorm}|${c.venueNorm ?? ''}`
+    const held = soonestBySeries.get(key)
+    if (!held) {
+      soonestBySeries.set(key, c)
+      out.push(c)
+    } else if (new Date(c.startTime).getTime() < new Date(held.startTime).getTime()) {
+      // A sooner date turned up later in the list: swap it into the held slot so
+      // the series keeps its original ranking position.
+      out[out.indexOf(held)] = c
+      soonestBySeries.set(key, c)
+    }
+  }
+  return out
 }
 
 // Greedy diversity pick: walk candidates best-first, taking one while its top
@@ -164,10 +257,15 @@ export function rankCandidates(candidates: Candidate[], taste: ActorTaste, opts:
   const categoryCap = opts.categoryCap ?? 3
   const venueCap = opts.venueCap ?? 2
 
-  const byId = new Map(candidates.map(c => [c.id, c]))
-  const scored: ScoredCandidate[] = candidates.map(c => {
+  // Collapse runs BEFORE scoring, so a series consumes one candidate slot rather
+  // than crowding the diversity caps with copies of itself.
+  const pool = opts.collapseSeries === false ? candidates : collapseSeries(candidates)
+
+  const byId = new Map(pool.map(c => [c.id, c]))
+  const scored: ScoredCandidate[] = pool.map(c => {
     const features = computeFeatures(c, taste, nowMs)
-    return { id: c.id, features, score: scoreFeatures(features, weights), explored: false }
+    const score = opts.trending ? trendingScore(c, nowMs) : scoreFeatures(features, weights)
+    return { id: c.id, features, score, explored: false }
   })
   scored.sort((a, b) => b.score - a.score)
 

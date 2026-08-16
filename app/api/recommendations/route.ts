@@ -9,8 +9,13 @@ import type { ActorTaste } from '@/lib/recs/score'
 
 // The ranking model at request time. A signed-in visitor gets a personalized,
 // diversity-ranked page (their taste read via the RLS-scoped Supabase client)
-// plus a serve_id to credit impressions. A logged-out visitor gets the same model
-// run with empty taste — a trending-shaped list — and no impression logging.
+// plus a serve_id to credit impressions. A logged-out visitor gets the model run
+// with empty taste, and no impression logging.
+//
+// `mode=trending` is a genuinely different ranking, not the same model with the
+// personalization zeroed out: it sorts by world-popularity and its rate of change
+// (see trendingScore in lib/recs/score.ts) so marquee events surface before
+// anyone on the platform has engaged with them.
 
 const RECS_MAX = 120
 const RECS_WINDOW_MS = 60 * 1000
@@ -42,7 +47,7 @@ export async function GET(req: NextRequest) {
     ? await Promise.all([getActorTaste(supabase), getActorEventState(supabase)])
     : [EMPTY_TASTE, EMPTY_STATE]
 
-  const { events, impressions, modelVersion, personalized } = await listRecommendedEvents(city.id, taste, state, { limit })
+  const { events, impressions, modelVersion, personalized } = await listRecommendedEvents(city.id, taste, state, { limit, trending })
 
   const serveId = randomUUID()
   if (user) {

@@ -19,6 +19,37 @@ export type RawEvent = {
   is_free: boolean
   price_min: number | null
   price_max: number | null
+  // Popularity evidence the source happened to carry — the raw material for
+  // `events.prominence` (see lib/recs/prominence.ts). Optional/nullable for the
+  // same reason `source_kind` is: seed data, submissions, and every crawl source
+  // supply none of it, and computeProminence treats an absent sub-signal as
+  // "unknown", never as "unpopular".
+  signals?: EventSignals | null
+}
+
+// Cross-source popularity evidence, normalized to a shape the prominence scorer
+// understands. Every field is optional: sources fill in whatever they have.
+export type EventSignals = {
+  // Names as the source spells them; resolved to canonical artists downstream.
+  performers?: string[]
+  // The source's own demand index, rescaled to [0,1] by the parser (SeatGeek
+  // ships this natively; Ticketmaster has no equivalent).
+  externalPopularity?: number
+  // How many other dated events this event's headliner has on the books — a
+  // proxy for touring scale (a national tour vs. a one-off local booking).
+  performerUpcomingEvents?: number
+  // Live resale supply. A falling count over successive polls is a sellout.
+  listingCount?: number
+  // Ticketing lifecycle. NOTE `offsale` is ambiguous on its own: Ticketmaster
+  // reports it both for "sold out" and for "not yet on sale". Reading it as a
+  // sellout requires salesStartTime below to prove the sale already opened.
+  ticketStatus?: 'onsale' | 'offsale' | 'cancelled'
+  // When public sale opened (ISO). Disambiguates `offsale`.
+  salesStartTime?: string
+  // RSVP/guest counts from the non-ticketed sources.
+  attendeeCount?: number
+  // Room size, when the source states it (otherwise read from venues.capacity).
+  venueCapacity?: number
 }
 
 // `city` carries enough of the `cities` row for structured APIs (Ticketmaster,
