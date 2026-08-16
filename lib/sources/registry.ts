@@ -17,6 +17,7 @@ import { fetchMeetupEvents } from './meetup'
 import { fetchLumaEvents } from './luma'
 import { fetchMeanwhileEvents } from './meanwhile'
 import { fetchAustinMonthlyEvents } from './austinmonthly'
+import { fetchShowlistEvents } from './showlist'
 import { extractEvents } from '@/lib/extractor'
 
 const has = (v: string | undefined): boolean => !!v && v.length > 0
@@ -100,6 +101,11 @@ export const PARSERS: Record<string, SourceParser> = {
   // list's own "Next" pagination link to exhaustion and captures each item's
   // event-specific flyer image from its `background-image` style.
   meanwhile: simple(() => true, (url, name) => fetchMeanwhileEvents(url!, name)),
+
+  // austin.showlists.net: the whole hand-curated Austin live-music listing —
+  // 780+ shows, ~3 months out — is statically rendered into the homepage, so
+  // one request covers the full window with no Gemini. `url` is the site root.
+  showlist: simple(() => true, (url, name) => fetchShowlistEvents(url!, name)),
 
   // austinmonthly.com/calendar/: WP custom calendar. Two structured passes,
   // no Gemini — paginate its admin-ajax load-more for all detail-page URLs,
