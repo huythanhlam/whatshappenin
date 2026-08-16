@@ -78,7 +78,6 @@ type SweatpalsResult = {
   isPaid?: unknown
   isOnlineEvent?: unknown
   prices?: unknown
-  participantsCount?: unknown
   attendeesLimit?: unknown
 }
 
@@ -221,7 +220,6 @@ function toRawEvent(r: SweatpalsResult, source: string): RawEvent | null {
     is_free: r.isPaid !== true,
     price_min: min,
     price_max: max,
-    signals: typeof r.participantsCount === 'number' ? { attendeeCount: r.participantsCount } : null,
   }
 }
 
