@@ -17,6 +17,8 @@ import {
   TRENDING_HALFLIFE_DAYS,
   TRENDING_PROMINENCE_WEIGHT,
   TRENDING_VELOCITY_WEIGHT,
+  TRENDING_MARQUEE_INSERT_AT,
+  TRENDING_MARQUEE_MIN_PROMINENCE,
 } from './config'
 
 // The feature vector. Keys match ModelWeights (minus bias). Kept as a plain
@@ -164,6 +166,9 @@ export type RankOptions = {
   // Collapse a multi-date run to its soonest showing (default true). See
   // collapseSeries.
   collapseSeries?: boolean
+  // Slots held for the biggest events regardless of date (default 0). Only
+  // meaningful alongside `trending`.
+  marqueeSlots?: number
   // Rank by trendingScore instead of the model. The feature vector is still
   // computed and logged, so trending impressions remain usable training data —
   // only the ordering differs.
@@ -254,6 +259,7 @@ function diversityPick(
 export function rankCandidates(candidates: Candidate[], taste: ActorTaste, opts: RankOptions): RankedImpression[] {
   const { weights, nowMs, limit } = opts
   const exploreSlots = Math.min(opts.exploreSlots ?? 2, Math.max(0, limit))
+  const marqueeSlots = Math.min(opts.marqueeSlots ?? 0, Math.max(0, limit))
   const categoryCap = opts.categoryCap ?? 3
   const venueCap = opts.venueCap ?? 2
 
@@ -269,20 +275,87 @@ export function rankCandidates(candidates: Candidate[], taste: ActorTaste, opts:
   })
   scored.sort((a, b) => b.score - a.score)
 
-  const exploitTarget = Math.max(0, limit - exploreSlots)
-  const exploited = diversityPick(scored, byId, exploitTarget, categoryCap, venueCap)
+  // Reserve the marquee block first, so exploitation fills around it rather than
+  // being trimmed after the fact.
+  const marquee = pickMarquee(scored, byId, marqueeSlots)
+  const marqueeIds = new Set(marquee.map(s => s.id))
 
-  if (exploited.length >= limit) return exploited.slice(0, limit).map(withPosition)
+  const exploitTarget = Math.max(0, limit - exploreSlots - marquee.length)
+  const exploited = diversityPick(
+    scored.filter(s => !marqueeIds.has(s.id)),
+    byId, exploitTarget, categoryCap, venueCap
+  )
+
+  if (exploited.length + marquee.length >= limit) {
+    return spliceMarquee(exploited, marquee).slice(0, limit).map(withPosition)
+  }
 
   // Exploration: from what's left, prefer the least-exposed events (lowest prior
   // engagement score → newest/least-shown), so exploration probes the unknown.
-  const chosenIds = new Set(exploited.map(s => s.id))
+  const chosenIds = new Set([...exploited.map(s => s.id), ...marqueeIds])
   const remaining = scored
     .filter(s => !chosenIds.has(s.id))
     .sort((a, b) => (byId.get(a.id)!.engagementScore ?? 0) - (byId.get(b.id)!.engagementScore ?? 0))
 
-  const explore = remaining.slice(0, limit - exploited.length).map(s => ({ ...s, explored: true }))
-  return [...exploited, ...explore].map(withPosition)
+  const explore = remaining
+    .slice(0, limit - exploited.length - marquee.length)
+    .map(s => ({ ...s, explored: true }))
+  return [...spliceMarquee(exploited, marquee), ...explore].map(withPosition)
+}
+
+// The biggest events in town, by raw prominence, ignoring how far off they are.
+//
+// This is the half of the trending rail that recency decay structurally cannot
+// deliver (see TRENDING_MARQUEE_SLOTS). Picks are capped by prominence floor —
+// a reserved slot is only worth spending on something genuinely big, and when
+// nothing qualifies the slots simply go back to normal ranking.
+//
+// One pick per title: without that, three dates of the same stadium act at
+// different venues would take the whole block (collapseSeries only merges same
+// title AND venue, since a tour playing two rooms is two real events).
+//
+// One pick per category, too. The block bypasses diversityPick, and the highest-
+// prominence events in a city are almost always concerts — measured on the live
+// Austin catalog, an uncapped block took the rail from 25% to 40% music, making
+// the music over-indexing that prominence already has materially worse. Capping
+// at one per category means the block surfaces the biggest MUSIC event, the
+// biggest SPORTS event, and so on, which is both more diverse and more useful
+// than the top three rows of the same list.
+function pickMarquee(
+  scored: ScoredCandidate[],
+  byId: Map<string, Candidate>,
+  slots: number
+): ScoredCandidate[] {
+  if (slots <= 0) return []
+
+  const byProminence = scored
+    .filter(s => (byId.get(s.id)!.prominence ?? 0) >= TRENDING_MARQUEE_MIN_PROMINENCE)
+    .sort((a, b) => (byId.get(b.id)!.prominence ?? 0) - (byId.get(a.id)!.prominence ?? 0))
+
+  const picked: ScoredCandidate[] = []
+  const seenTitles = new Set<string>()
+  const seenCategories = new Set<string>()
+  for (const s of byProminence) {
+    if (picked.length >= slots) break
+    const cand = byId.get(s.id)!
+    const title = cand.titleNorm
+    const category = cand.categorySlugs[0] ?? 'other'
+    if (title && seenTitles.has(title)) continue
+    if (seenCategories.has(category)) continue
+    if (title) seenTitles.add(title)
+    seenCategories.add(category)
+    picked.push(s)
+  }
+  return picked
+}
+
+// Interleave the reserved block into the ranked list at TRENDING_MARQUEE_INSERT_AT.
+// Not at the very top — whatever is hottest right now should still lead — but
+// high enough that the block is seen rather than buried near the fold.
+function spliceMarquee(ranked: ScoredCandidate[], marquee: ScoredCandidate[]): ScoredCandidate[] {
+  if (marquee.length === 0) return ranked
+  const at = Math.min(TRENDING_MARQUEE_INSERT_AT, ranked.length)
+  return [...ranked.slice(0, at), ...marquee, ...ranked.slice(at)]
 }
 
 // Positions are assigned after final ordering; carried on the scored object for

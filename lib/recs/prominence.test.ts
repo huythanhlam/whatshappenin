@@ -74,7 +74,7 @@ describe('computeProminence', () => {
         },
         artist: { popularity: 100, followers: 1e12 },
         sourceCount: 500,
-        editorialPick: true,
+        editorialStrength: 1,
         priceMin: 100_000,
         startTime: FUTURE,
       })
@@ -136,11 +136,22 @@ describe('prominenceParts', () => {
     expect(parts).toEqual([])
   })
 
-  it('does not penalize an explicit editorialPick: false', () => {
-    // Nearly the whole catalog is un-curated; absence of a pick must not score
-    // as a zero, or every non-curated event gets dragged down.
-    expect(prominenceParts(input({ editorialPick: false }))).toEqual([])
-    expect(prominenceParts(input({ editorialPick: true })).map(p => p.key)).toEqual(['editorial'])
+  it('does not penalize an event no editorial source listed', () => {
+    // Nearly the whole catalog is un-curated; absence must not score as a zero,
+    // or every non-curated event gets dragged down.
+    expect(prominenceParts(input({ editorialStrength: 0 }))).toEqual([])
+    expect(prominenceParts(input({ editorialStrength: 1 })).map(p => p.key)).toEqual(['editorial'])
+  })
+
+  it('grades a listings-calendar mention below a hand-picked shortlist', () => {
+    // The distortion this replaced: a boolean scored "appeared in a monthly
+    // calendar of 240 events" the same as "an editor chose this", and that fired
+    // on ~22% of the catalog.
+    const shortlist = prominenceParts(input({ editorialStrength: 1.0 })).find(p => p.key === 'editorial')
+    const calendar = prominenceParts(input({ editorialStrength: 0.2 })).find(p => p.key === 'editorial')
+    expect(shortlist!.value).toBeGreaterThan(calendar!.value)
+    expect(computeProminence(input({ editorialStrength: 1.0 })))
+      .toBeGreaterThan(computeProminence(input({ editorialStrength: 0.2 })))
   })
 
   it('prefers a source-stated capacity over the venues-table fallback', () => {

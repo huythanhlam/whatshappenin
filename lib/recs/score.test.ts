@@ -266,3 +266,112 @@ describe('multi-date run collapse', () => {
     expect(ranked).toHaveLength(2)
   })
 })
+
+describe('marquee slots', () => {
+  const soon = new Date(NOW + 2 * 86_400_000).toISOString()
+  const distant = new Date(NOW + 29 * 86_400_000).toISOString()
+
+  // The case that motivated this: a stadium show a month out cannot win on
+  // trendingScore at any half-life short enough to keep the rail about now.
+  const stadium = () => cand('stadium', {
+    startTime: distant, prominence: 0.89, titleNorm: 'j cole', venueNorm: 'moody center atx',
+  })
+  const filler = (i: number) => cand(`f${i}`, {
+    startTime: soon, prominence: 0.2, titleNorm: `f${i}`, venueNorm: `v${i}`,
+    categorySlugs: [['music', 'arts', 'comedy', 'sports'][i % 4]],
+  })
+
+  it('surfaces a distant giant that trendingScore alone would bury', () => {
+    const cands = [stadium(), ...Array.from({ length: 12 }, (_, i) => filler(i))]
+    const without = rankCandidates(cands, taste(), {
+      weights: V2_MODEL_WEIGHTS, nowMs: NOW, limit: 6, exploreSlots: 0, trending: true,
+    })
+    const withMarquee = rankCandidates(cands, taste(), {
+      weights: V2_MODEL_WEIGHTS, nowMs: NOW, limit: 6, exploreSlots: 0, trending: true,
+      marqueeSlots: 3,
+    })
+    expect(without.map(r => r.id)).not.toContain('stadium')
+    expect(withMarquee.map(r => r.id)).toContain('stadium')
+  })
+
+  it('does not let the block lead — the hottest current event still ranks first', () => {
+    const cands = [stadium(), ...Array.from({ length: 12 }, (_, i) => filler(i))]
+    const ranked = rankCandidates(cands, taste(), {
+      weights: V2_MODEL_WEIGHTS, nowMs: NOW, limit: 8, exploreSlots: 0, trending: true,
+      marqueeSlots: 3,
+    })
+    expect(ranked[0].id).not.toBe('stadium')
+    expect(ranked.findIndex(r => r.id === 'stadium')).toBeLessThan(5)
+  })
+
+  it('leaves the slots unused when nothing clears the prominence floor', () => {
+    // A quiet catalog must not get an arbitrary "marquee" section of mediocre
+    // events — the slots go back to normal ranking.
+    const cands = Array.from({ length: 8 }, (_, i) => filler(i))
+    const ranked = rankCandidates(cands, taste(), {
+      weights: V2_MODEL_WEIGHTS, nowMs: NOW, limit: 5, exploreSlots: 0, trending: true,
+      marqueeSlots: 3,
+    })
+    expect(ranked).toHaveLength(5)
+    expect(new Set(ranked.map(r => r.id)).size).toBe(5)
+  })
+
+  it('never spends the whole block on one act playing several rooms', () => {
+    // collapseSeries only merges same title AND venue, so a tour would otherwise
+    // take every reserved slot.
+    const tour = (i: number) => cand(`t${i}`, {
+      startTime: distant, prominence: 0.9, titleNorm: 'j cole', venueNorm: `room-${i}`,
+    })
+    const cands = [tour(1), tour(2), tour(3), ...Array.from({ length: 8 }, (_, i) => filler(i))]
+    const ranked = rankCandidates(cands, taste(), {
+      weights: V2_MODEL_WEIGHTS, nowMs: NOW, limit: 8, exploreSlots: 0, trending: true,
+      marqueeSlots: 3, venueCap: 9,
+    })
+    expect(ranked.filter(r => r.id.startsWith('t'))).toHaveLength(1)
+  })
+
+  it('returns no duplicates and respects the limit', () => {
+    const cands = [stadium(), ...Array.from({ length: 20 }, (_, i) => filler(i))]
+    const ranked = rankCandidates(cands, taste(), {
+      weights: V2_MODEL_WEIGHTS, nowMs: NOW, limit: 10, exploreSlots: 2, trending: true,
+      marqueeSlots: 3,
+    })
+    expect(ranked).toHaveLength(10)
+    expect(new Set(ranked.map(r => r.id)).size).toBe(10)
+    expect(ranked.map(r => r.position)).toEqual([...Array(10).keys()])
+  })
+
+  it('is off by default, so the personalized feed is unaffected', () => {
+    const cands = [stadium(), ...Array.from({ length: 6 }, (_, i) => filler(i))]
+    const ranked = rankCandidates(cands, taste(), {
+      weights: V2_MODEL_WEIGHTS, nowMs: NOW, limit: 4, exploreSlots: 0,
+    })
+    expect(ranked).toHaveLength(4)
+  })
+})
+
+describe('marquee diversity', () => {
+  const distant = new Date(NOW + 29 * 86_400_000).toISOString()
+  const big = (id: string, category: string, prom: number) =>
+    cand(id, { startTime: distant, prominence: prom, titleNorm: id, venueNorm: id, categorySlugs: [category] })
+
+  it('spends the block on one big event per category, not the top of one list', () => {
+    // Uncapped, the three highest-prominence events in a city are almost always
+    // all concerts — measured 25% -> 40% music on the live Austin rail.
+    const cands = [
+      big('m1', 'music', 0.90), big('m2', 'music', 0.88), big('m3', 'music', 0.86),
+      big('s1', 'sports', 0.80), big('c1', 'comedy', 0.75),
+      ...Array.from({ length: 10 }, (_, i) =>
+        cand(`f${i}`, { prominence: 0.2, titleNorm: `f${i}`, venueNorm: `v${i}` })),
+    ]
+    const ranked = rankCandidates(cands, taste(), {
+      weights: V2_MODEL_WEIGHTS, nowMs: NOW, limit: 12, exploreSlots: 0, trending: true,
+      marqueeSlots: 3, venueCap: 9, categoryCap: 9,
+    })
+    const marqueeIds = ranked.slice(2, 5).map(r => r.id)
+    expect(marqueeIds).toContain('m1')
+    expect(marqueeIds).toContain('s1')
+    expect(marqueeIds).toContain('c1')
+    expect(marqueeIds).not.toContain('m2')
+  })
+})
