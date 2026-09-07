@@ -1,0 +1,33 @@
+version: 2
+
+updates:
+  # Application dependencies.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      # One PR a week for the routine churn; majors still arrive individually so
+      # they get read properly.
+      npm-minor-and-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
+
+  # GitHub Actions. Not optional: every `uses:` in .github/workflows is pinned to
+  # a full commit SHA, which is immutable — including when upstream ships a
+  # security fix. This ecosystem is what advances those pins (and their trailing
+  # version comments) instead of letting them quietly rot.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      actions-minor-and-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch

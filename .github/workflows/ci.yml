@@ -5,24 +5,31 @@ on:
     branches: [main]
   pull_request:
 
-# Cancel superseded runs on the same ref.
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+# Least privilege for the automatically-provisioned GITHUB_TOKEN. No job here
+# writes to the repo (no commits, no releases, no comments, no package or OIDC
+# use), so read-only contents is all that is needed. Any job that later needs
+# more should raise it in that job's own `permissions:`, not here.
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Cancel superseded runs on the same ref. Scoped to `build` only: cancelling
+    # a lint/test run is free, cancelling a migration mid-flight is not.
+    concurrency:
+      group: ci-build-${{ github.ref }}
+      cancel-in-progress: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
           cache: npm
 
       - name: Install
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Lint
         run: npm run lint
@@ -44,30 +51,44 @@ jobs:
   # Two eras, two mechanisms (see the LEGACY_MIGRATION_CEILING note in
   # lib/db/migrate.ts):
   #   - Legacy ≤ 033 — applied by `npm run migrate` over the pooler DATABASE_URL,
-  #     tracked in the `_migrations` ledger.
+  #     tracked in the `_migrations` ledger.               (migrate-legacy below)
   #   - Supabase-Auth era 034+ (auth schema / roles / RLS) — applied by
   #     `supabase db push` against the linked project, tracked in the CLI's own
-  #     `supabase_migrations.schema_migrations` history.
+  #     `supabase_migrations.schema_migrations` history.  (migrate-supabase below)
   # Each step no-ops (instead of failing the run) until its secrets are set.
-  migrate:
+  #
+  # These are two separate jobs, not two steps, on purpose. `npm run migrate`
+  # needs the project's own dependency tree, so that job unavoidably fetches and
+  # executes third-party code. Running it on its own runner keeps that code off
+  # the same VM as SUPABASE_ACCESS_TOKEN / SUPABASE_DB_PASSWORD: migrate-supabase
+  # installs nothing from npm and runs only the pinned, first-party Supabase CLI.
+
+  # Legacy era (≤ 033). Requires a DATABASE_URL repo secret (the Supabase pooler
+  # connection). If the pooler's cert chain trips SELF_SIGNED_CERT_IN_CHAIN, also
+  # add a DATABASE_CA_CERT repo secret (see .env.example for how to obtain it).
+  migrate-legacy:
     needs: build
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # Never cancel a migration mid-flight — a half-applied schema is worse than a
+    # queued run. Shared with migrate-supabase so the whole migration sequence of
+    # one run finishes before the next run's begins.
+    concurrency:
+      group: ci-migrate-${{ github.ref }}
+      cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24
           cache: npm
 
+      # --ignore-scripts is also the repo default via .npmrc; repeated here so
+      # the guarantee survives someone editing that file.
       - name: Install
-        run: npm ci
+        run: npm ci --ignore-scripts
 
-      # Legacy era (≤ 033). Requires a DATABASE_URL repo secret (the Supabase
-      # pooler connection). If the pooler's cert chain trips
-      # SELF_SIGNED_CERT_IN_CHAIN, also add a DATABASE_CA_CERT repo secret (see
-      # .env.example for how to obtain it).
       - name: Apply legacy migrations to Supabase (≤ 033)
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -80,12 +101,27 @@ jobs:
             echo "Add it under repo Settings → Secrets and variables → Actions to enable auto-migration."
           fi
 
-      # Supabase-Auth era (034+). Installing the CLI needs no secret; the push
-      # itself is guarded on SUPABASE_ACCESS_TOKEN + SUPABASE_PROJECT_ID.
+  # Supabase-Auth era (034+). Runs on a clean runner with no npm install at all:
+  # the only executable this job pulls in is the pinned Supabase CLI. Ordered
+  # after migrate-legacy so the two eras apply in sequence.
+  migrate-supabase:
+    needs: migrate-legacy
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: ci-migrate-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # Installing the CLI needs no secret; the push itself is guarded on
+      # SUPABASE_ACCESS_TOKEN + SUPABASE_PROJECT_ID. `version:` is pinned rather
+      # than `latest` — `latest` resolves an arbitrary binary at run time, a
+      # second unpinned hop behind the action SHA.
       - name: Set up Supabase CLI
-        uses: supabase/setup-cli@v1
+        uses: supabase/setup-cli@ab058987d8d6c725971f6cf9d0b5c98467e30bd1 # v1.7.1
         with:
-          version: latest
+          version: 2.116.0
 
       - name: Push Supabase-era migrations (034+) to the linked project
         env:
